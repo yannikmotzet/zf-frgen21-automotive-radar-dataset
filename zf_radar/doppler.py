@@ -153,9 +153,19 @@ def associate_moving(frame, partner, candidates, dt, yaw_rate=0.0,
     return unwrapped, ok
 
 
-def unwrap_frame(frame, partner, dt, prior=None, lever_x=3.925, threshold=0.25, wide=False):
-    """Unwrap one frame. Returns dict with ``velocity_unwrapped``, ``wrap_k``,
-    ``unwrap_status`` (per point), ``sensor_velocity`` (3,) and ``static_fraction``."""
+def unwrap_frame(frame, partners=(), prior=None, lever_x=3.925, threshold=0.25, wide=False,
+                 consistency=1.0):
+    """Unwrap one frame. ``partners`` is a sequence of ``(neighbour_frame, dt)``
+    with ``dt = time(frame) - time(neighbour)`` (one or two neighbours).
+
+    A moving point is resolved if a neighbour resolves it; with two neighbours
+    that both resolve it, they must agree within ``consistency`` m/s, otherwise
+    the point stays unresolved (conflict).
+
+    Returns dict with ``velocity_unwrapped``, ``wrap_k``, ``unwrap_status`` (per
+    point), ``sensor_velocity`` (3,), ``static_fraction`` and the moving-point
+    counts ``n_both`` (resolved by both neighbours) and ``n_conflict``.
+    """
     m = np.asarray(frame["velocity"], float)
     A = frame["_meta"]["velocity_ambiguity"]
     u = unit_vectors(frame)
@@ -167,12 +177,21 @@ def unwrap_frame(frame, partner, dt, prior=None, lever_x=3.925, threshold=0.25, 
     unwrapped[static] = m[static] + np.round((pred[static] - m[static]) / A) * A
     status[static] = STATUS_STATIC
 
-    if partner is not None:
+    n_both = n_conflict = 0
+    moving = np.flatnonzero(~static)
+    if partners and len(moving):
         # vehicle has no lateral velocity at the rear axle: sensor vy = yaw_rate * lever
         yaw_rate = v[1] / lever_x
-        moving_v, ok = associate_moving(frame, partner, ~static, dt, yaw_rate)
-        moving = np.flatnonzero(~static)
-        unwrapped[moving[ok]] = moving_v[ok]
+        sols = [associate_moving(frame, partner, ~static, dt, yaw_rate) for partner, dt in partners]
+        vel, ok = sols[0]
+        if len(sols) == 2:
+            (v1, ok1), (v2, ok2) = sols
+            both = ok1 & ok2
+            conflict = both & (np.abs(v1 - v2) >= consistency)
+            n_both, n_conflict = int(both.sum()), int(conflict.sum())
+            vel = np.where(ok1, v1, v2)
+            ok = (ok1 | ok2) & ~conflict
+        unwrapped[moving[ok]] = vel[ok]
         status[moving[ok]] = STATUS_TRACKED
 
     return {
@@ -181,29 +200,39 @@ def unwrap_frame(frame, partner, dt, prior=None, lever_x=3.925, threshold=0.25, 
         "unwrap_status": status,
         "sensor_velocity": v,
         "static_fraction": static_fraction,
+        "n_both": n_both,
+        "n_conflict": n_conflict,
     }
 
 
-def unwrap_sequence(frames, lever_x=3.925, threshold=0.25, lost_fraction=0.2, lost_frames=5):
+def unwrap_sequence(frames, two_sided=False, lever_x=3.925, threshold=0.25, lost_fraction=0.2, lost_frames=5):
     """Yield ``(frame, result)`` for consecutive frames (any iterable of
-    ``load_pcd`` dicts). Each frame is paired with its predecessor, the first
-    with its successor; the ego-velocity search is seeded with the previous
-    frame's estimate. After ``lost_frames`` frames in a row with a static
-    inlier fraction below ``lost_fraction`` the wide search is re-enabled."""
+    ``load_pcd`` dicts).
+
+    Causal by default: each frame's moving points are resolved against its
+    predecessor (the first frame against its successor), so it can run online.
+    ``two_sided=True`` also uses the successor (offline; one frame of lookahead),
+    which resolves more moving points and rejects inconsistent ones. The
+    ego-velocity search is seeded with the previous frame's estimate; after
+    ``lost_frames`` frames in a row with a static inlier fraction below
+    ``lost_fraction`` the wide search is re-enabled.
+    """
     it = iter(frames)
-    prev = next(it, None)
-    if prev is None:
+    cur = next(it, None)
+    if cur is None:
         return
     nxt = next(it, None)
     ts = lambda f: f["_meta"]["timestamp_ns"] * 1e-9
-    res = unwrap_frame(prev, nxt, ts(prev) - ts(nxt) if nxt is not None else 0.0,
-                       None, lever_x, threshold)
-    yield prev, res
-    prior, lost = res["sensor_velocity"], 0
-    while nxt is not None:
-        cur, nxt = nxt, next(it, None)
-        res = unwrap_frame(cur, prev, ts(cur) - ts(prev), prior, lever_x, threshold,
-                           wide=lost >= lost_frames)
+    prev, prior, lost = None, None, 0
+    while cur is not None:
+        partners = []
+        if prev is not None:
+            partners.append((prev, ts(cur) - ts(prev)))
+        if nxt is not None and (two_sided or prev is None):
+            partners.append((nxt, ts(cur) - ts(nxt)))
+        res = unwrap_frame(cur, partners, prior, lever_x, threshold,
+                           wide=prior is not None and lost >= lost_frames)
         yield cur, res
         lost = lost + 1 if res["static_fraction"] < lost_fraction else 0
-        prev, prior = cur, res["sensor_velocity"]
+        prior = res["sensor_velocity"]
+        prev, cur, nxt = cur, nxt, next(it, None)

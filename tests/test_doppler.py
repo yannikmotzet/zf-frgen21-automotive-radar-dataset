@@ -83,3 +83,22 @@ def test_static_and_moving_points_unwrapped():
         np.testing.assert_allclose(res["velocity_unwrapped"][car], -45.0, atol=0.1)
         assert np.all(res["wrap_k"][car] != 0)
         assert res["wrap_k"].dtype == np.int8
+
+
+def test_two_sided_resolves_against_both_neighbours():
+    rng = np.random.default_rng(2)
+    v_sensor = np.array([15.0, 0.0, 0.0])
+    frames = []
+    for i in range(3):
+        r_car = 50.0 - 40.0 * DT * i
+        moving = (np.full(3, r_car) + [0.0, 0.3, 0.6], np.radians([-3.0, -3.2, -3.4]), np.full(3, -40.0))
+        frames.append(make_frame(i, v_sensor, rng, moving)[0])
+
+    causal = [res for _, res in unwrap_sequence(frames)]
+    both = [res for _, res in unwrap_sequence(frames, two_sided=True)]
+    # the middle frame has two neighbours: both resolve the car and agree
+    assert causal[1]["n_both"] == 0
+    assert both[1]["n_both"] == 3 and both[1]["n_conflict"] == 0
+    for res in both:
+        assert np.all(res["unwrap_status"][-3:] == STATUS_TRACKED)
+        np.testing.assert_allclose(res["velocity_unwrapped"][-3:], -40.0, atol=0.1)

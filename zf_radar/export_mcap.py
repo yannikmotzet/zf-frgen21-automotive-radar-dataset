@@ -302,7 +302,8 @@ def export_sequence(seq_dir, out_path, limit=None, progress=True, georef=None, a
         topics.update(UNWRAP_TOPICS)
 
     frames = (load_pcd(path) for path in files)
-    stream = unwrap_sequence(frames) if unwrap_doppler else ((f, None) for f in frames)
+    # offline export: resolve moving points against both neighbouring frames
+    stream = unwrap_sequence(frames, two_sided=True) if unwrap_doppler else ((f, None) for f in frames)
     exporter = McapExporter(out_path, topics)
     try:
         for i, (pcd, unwrapped) in enumerate(stream):

@@ -7,12 +7,14 @@ motion (wrapped residual below --tol), the correct wrap count is known; the
 script reports how often the unwrapper recovers it, overall and in frames where
 the ego speed exceeds the wrap speed. It also reports the error of the
 radar-only sensor velocity estimate and the share of points per status.
-Moving targets have no ground truth: as a cross-check, every point resolved
+Moving targets have no ground truth: in the causal mode, every point resolved
 against the previous frame is resolved again, independently, against the next
-frame, and the two results must agree.
+frame, and the two results must agree. With --two-sided both neighbours are part
+of the solution, so the report shows how often they agree where both resolve a
+point (disagreements stay unresolved).
 
 Usage:
-    python scripts/eval_doppler_unwrap.py -p /path/to/ZF_Dataset [--seq zf_03] [--limit N]
+    python scripts/eval_doppler_unwrap.py -p /path/to/ZF_Dataset [--seq zf_03] [--limit N] [--two-sided]
 """
 
 import argparse
@@ -34,7 +36,7 @@ from zf_radar.doppler import (
 from zf_radar.loaders import discover_sequences, load_extrinsics, load_ground_truth, load_pcd
 
 
-def evaluate(seq_dir, limit=None, tol=0.3):
+def evaluate(seq_dir, limit=None, tol=0.3, two_sided=False):
     files = sorted(glob.glob(os.path.join(seq_dir, "radar", "*.pcd")))[:limit]
     gt = load_ground_truth(seq_dir)
     T = load_extrinsics(seq_dir)
@@ -43,11 +45,13 @@ def evaluate(seq_dir, limit=None, tol=0.3):
     n_gt_static = n_ok = n_fast = n_fast_ok = n_wrapped = n_wrapped_ok = 0
     status_counts = np.zeros(3, int)
     vel_err = []
-    n_cross = n_cross_ok = 0
+    n_cross = n_cross_ok = n_both = n_conflict = 0
     prev = None
     t0 = time.time()
-    for i, (frame, res) in enumerate(unwrap_sequence(load_pcd(f) for f in files)):
-        if prev is not None:
+    for i, (frame, res) in enumerate(unwrap_sequence((load_pcd(f) for f in files), two_sided=two_sided)):
+        n_both += res["n_both"]
+        n_conflict += res["n_conflict"]
+        if prev is not None and not two_sided:
             p_frame, p_res = prev
             tracked = p_res["unwrap_status"] == STATUS_TRACKED
             dt = (p_frame["_meta"]["timestamp_ns"] - frame["_meta"]["timestamp_ns"]) * 1e-9
@@ -86,7 +90,7 @@ def evaluate(seq_dir, limit=None, tol=0.3):
         "ego_vel_err_p99": np.percentile(vel_err, 99),
         "ego_vel_err_gt_1ms_pct": 100.0 * np.mean(vel_err > 1.0),
         "status_pct": 100.0 * status_counts / status_counts.sum(),
-        "tracked_crosscheck_agree_pct": pct(n_cross_ok, n_cross),
+        "tracked_crosscheck_agree_pct": pct(n_cross_ok, n_cross) if not two_sided else pct(n_both - n_conflict, n_both),
         "tracked_crosscheck_n": n_cross,
         "ms_per_frame": 1000 * (time.time() - t0) / max(len(vel_err), 1),
     }
@@ -98,12 +102,13 @@ def main():
     parser.add_argument("--seq", nargs="+", help="Only these sequences (default: all)")
     parser.add_argument("--limit", type=int, help="Only the first N frames per sequence")
     parser.add_argument("--tol", type=float, default=0.3, help="Static-model tolerance in m/s (default 0.3)")
+    parser.add_argument("--two-sided", action="store_true", help="Resolve moving points against both neighbours")
     args = parser.parse_args()
 
     print(f"{'seq':6} {'frames':>6} {'static ok':>9} {'wrapped ok':>10} {'(n wrapped)':>11} {'fast ok':>8} "
           f"{'v err med':>9} {'p99':>6} {'>1 m/s':>7} {'static':>7} {'tracked':>7} {'unres.':>7} {'x-check':>8} {'ms/fr':>6}")
     for name in args.seq or discover_sequences(args.path):
-        r = evaluate(os.path.join(args.path, name), args.limit, args.tol)
+        r = evaluate(os.path.join(args.path, name), args.limit, args.tol, args.two_sided)
         s = r["status_pct"]
         print(f"{name:6} {r['frames']:6d} {r['static_correct_pct']:8.2f}% {r['wrapped_static_correct_pct']:9.2f}% "
               f"{r['wrapped_static_points']:11d} {r['fast_frames_static_correct_pct']:7.2f}% "
