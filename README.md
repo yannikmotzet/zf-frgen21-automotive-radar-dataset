@@ -231,6 +231,22 @@ upcoming), the rear-axle and sensor positions, and the ego-vehicle outline.
 The azimuth–Doppler plot uses a driver's-eye orientation (targets to the
 right of the vehicle appear on the right).
 
+## Route plots and statistics
+
+```bash
+pip install ".[plot]"
+zf-radar-plot -p /path/to/ZF_Dataset -o plots/
+```
+
+Writes `routes_overview.png` (top-down route of every sequence, colored by
+speed), one `<seq>_profile.png` per sequence (route plus speed, height, yaw rate
+and detections per frame over time) and a `summary.csv`. The speed panel marks
+the Doppler wrap speed of both scan modes (`velocity_ambiguity / 2`); the
+summary reports the share of frames whose ego speed exceeds it, i.e. where
+static targets straight ahead show wrapped Doppler. Routes are drawn in each
+sequence's local world frame — the dataset contains no geodetic coordinates,
+so sequences cannot be placed on a map or relative to each other.
+
 ## License
 
 The loader and visualization software in this repository is released under the

@@ -20,3 +20,6 @@ ground_truth.csv
 !tests/**/*.pcd
 !tests/**/extrinsics.csv
 !tests/**/ground_truth.csv
+
+# Generated outputs
+plots/

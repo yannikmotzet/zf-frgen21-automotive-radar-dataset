@@ -19,9 +19,13 @@ viz = [
     "PyQt6>=6.2",
     "PyOpenGL>=3.1",
 ]
+plot = [
+    "matplotlib>=3.5",
+]
 
 [project.scripts]
 zf-radar-viz = "zf_radar.visualizer:main"
+zf-radar-plot = "zf_radar.plots:main"
 
 [tool.setuptools]
 packages = ["zf_radar"]
