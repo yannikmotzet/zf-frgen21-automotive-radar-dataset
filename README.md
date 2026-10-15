@@ -47,11 +47,6 @@ Doppler-wrapped frames are those whose ego speed exceeds the frame's wrap speed
 `velocity_ambiguity / 2`, i.e. static targets straight ahead alias. Computed
 with `zf-radar-plot` (`summary.csv`).
 
-![Top-down routes of all six sequences, colored by speed](docs/routes_overview.png)
-
-Routes in each sequence's local world frame, colored by speed (generated with
-`zf-radar-plot`, see [Route plots and statistics](#route-plots-and-statistics)).
-
 ![All six routes on an OpenStreetMap base map around Friedrichshafen](docs/routes_map.png)
 
 Approximate location of all routes in and around Friedrichshafen. The dataset
@@ -305,8 +300,12 @@ and detections per frame over time) and a `summary.csv`. The speed panel marks
 the Doppler wrap speed of both scan modes (`velocity_ambiguity / 2`); the
 summary reports the share of frames whose ego speed exceeds it, i.e. where
 static targets straight ahead show wrapped Doppler. Routes are drawn in each
-sequence's local world frame — the dataset contains no geodetic coordinates,
-so sequences cannot be placed on a map or relative to each other.
+sequence's local world frame (the dataset contains no geodetic coordinates —
+see the [map](#sequences) for the reconstructed placement), so their
+orientation differs from the map. The swatch next to each title is the
+sequence's color in the map.
+
+![Top-down routes of all six sequences in their local world frames, colored by speed](docs/routes_overview.png)
 
 ## ROS 2 MCAP export
 
