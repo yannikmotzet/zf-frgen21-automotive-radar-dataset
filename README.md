@@ -40,6 +40,11 @@ zf-radar-viz -p /path/to/ZF_Dataset
 | zf_05    | 17,717 | 26.6 min | 10.9 km  |
 | zf_06    | 21,643 | 32.5 min | 14.9 km  |
 
+![Top-down routes of all six sequences, colored by speed](docs/routes_overview.png)
+
+Routes in each sequence's local world frame, colored by speed (generated with
+`zf-radar-plot`, see [Route plots and statistics](#route-plots-and-statistics)).
+
 ## Directory layout
 
 ```
