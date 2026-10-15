@@ -9,8 +9,13 @@ Topics (all stamped with the radar frame's ``timestamp_ns``):
     /tf                         tf2_msgs/msg/TFMessage        world -> base_link per frame
     /tf_static                  tf2_msgs/msg/TFMessage        base_link -> radar (extrinsics), once
 
-Only needs ``mcap`` and ``mcap-ros2-support`` — no ROS installation. The files
-open in Foxglove and play back with ``ros2 bag play -s mcap <file>``.
+With ``--georef poses.json`` (start pose per sequence, see zf_radar.georef) also:
+    /tf_static                  map -> world                  world placed in the shared map frame
+    /gnss/fix                   sensor_msgs/msg/NavSatFix     WGS 84 position of base_link per frame
+
+Only needs ``mcap`` and ``mcap-ros2-support`` — no ROS installation (``pyproj``
+for ``--georef``). The files open in Foxglove and play back with
+``ros2 bag play -s mcap <file>``.
 """
 
 import argparse
@@ -28,8 +33,10 @@ except ImportError as e:
         '  pip install "zf-frgen21-radar-dataset[mcap]"'
     ) from e
 
+from zf_radar.georef import load_georef
 from zf_radar.loaders import discover_sequences, load_extrinsics, load_ground_truth, load_pcd
 
+MAP_FRAME = "map"
 WORLD_FRAME = "world"
 VEHICLE_FRAME = "base_link"
 SENSOR_FRAME = "radar"
@@ -83,6 +90,16 @@ MSGDEFS = {
         "MSG: geometry_msgs/Twist\nVector3 linear\nVector3 angular",
         _VECTOR3,
     ),
+    "sensor_msgs/msg/NavSatFix": _msgdef(
+        "std_msgs/Header header\nNavSatStatus status\nfloat64 latitude\nfloat64 longitude\nfloat64 altitude\n"
+        "float64[9] position_covariance\nuint8 COVARIANCE_TYPE_UNKNOWN=0\nuint8 COVARIANCE_TYPE_APPROXIMATED=1\n"
+        "uint8 COVARIANCE_TYPE_DIAGONAL_KNOWN=2\nuint8 COVARIANCE_TYPE_KNOWN=3\nuint8 position_covariance_type",
+        _HEADER,
+        _TIME,
+        "MSG: sensor_msgs/NavSatStatus\nint8 STATUS_NO_FIX=-1\nint8 STATUS_FIX=0\nint8 STATUS_SBAS_FIX=1\n"
+        "int8 STATUS_GBAS_FIX=2\nint8 status\nuint16 SERVICE_GPS=1\nuint16 SERVICE_GLONASS=2\n"
+        "uint16 SERVICE_COMPASS=4\nuint16 SERVICE_GALILEO=8\nuint16 service",
+    ),
     "nav_msgs/msg/Path": _msgdef(
         "std_msgs/Header header\ngeometry_msgs/PoseStamped[] poses",
         _HEADER, _TIME, _POSE_STAMPED, _POSE, _POINT, _QUAT,
@@ -110,8 +127,13 @@ TOPICS = {
     "/tf": ("tf2_msgs/msg/TFMessage", QOS_VOLATILE),
     "/tf_static": ("tf2_msgs/msg/TFMessage", QOS_LATCHED),
 }
+GEO_TOPICS = {
+    "/gnss/fix": ("sensor_msgs/msg/NavSatFix", QOS_VOLATILE),
+}
 
 POINTFIELD_FLOAT32 = 7
+NAVSAT_COVARIANCE_APPROXIMATED = 1
+DEFAULT_GEO_CRS = "EPSG:32632"
 
 
 def rotation_to_quaternion(R):
@@ -181,13 +203,13 @@ def pointcloud_msg(ns, pcd, fields):
 class McapExporter:
     """Thin wrapper over the MCAP writer: one channel per topic, CDR-encoded."""
 
-    def __init__(self, path):
+    def __init__(self, path, topics=TOPICS):
         self._file = open(path, "wb")
         self._writer = Writer(self._file, compression=CompressionType.ZSTD)
         self._writer.start(profile="ros2", library="zf_radar.export_mcap")
         self._channels = {}
         self._encoders = {}
-        for topic, (datatype, qos) in TOPICS.items():
+        for topic, (datatype, qos) in topics.items():
             schema_id = self._writer.register_schema(datatype, "ros2msg", MSGDEFS[datatype].encode())
             self._channels[topic] = self._writer.register_channel(
                 topic, "cdr", schema_id, metadata={"offered_qos_profiles": qos}
@@ -204,8 +226,39 @@ class McapExporter:
         self._file.close()
 
 
-def export_sequence(seq_dir, out_path, limit=None, progress=True):
-    """Write one sequence to ``out_path``. Returns the number of radar frames written."""
+def geo_positions(T_utm_world, xyz, crs=DEFAULT_GEO_CRS):
+    """World-frame points -> (lat, lon, height) via the start pose ``T_utm_world``."""
+    try:
+        from pyproj import Transformer
+    except ImportError as e:
+        raise SystemExit(
+            "Missing dependency for --georef: pyproj. Install the [geo] extras:\n"
+            '  pip install "zf-frgen21-radar-dataset[geo]"'
+        ) from e
+    projected = xyz @ T_utm_world[:3, :3].T + T_utm_world[:3, 3]
+    lon, lat = Transformer.from_crs(crs, "EPSG:4326", always_xy=True).transform(projected[:, 0], projected[:, 1])
+    return np.asarray(lat), np.asarray(lon), projected[:, 2]
+
+
+def navsatfix_msg(ns, lat, lon, alt, sigma_h, sigma_v):
+    return {
+        "header": {"stamp": _stamp(ns), "frame_id": VEHICLE_FRAME},
+        "status": {"status": 0, "service": 1},
+        "latitude": float(lat),
+        "longitude": float(lon),
+        "altitude": float(alt),
+        "position_covariance": [sigma_h ** 2, 0.0, 0.0, 0.0, sigma_h ** 2, 0.0, 0.0, 0.0, sigma_v ** 2],
+        "position_covariance_type": NAVSAT_COVARIANCE_APPROXIMATED,
+    }
+
+
+def export_sequence(seq_dir, out_path, limit=None, progress=True, georef=None, accuracy=(2.0, 2.0)):
+    """Write one sequence to ``out_path``. Returns the number of radar frames written.
+
+    ``georef`` is one sequence entry of a decoded georef file (``T_utm_world``,
+    ``map_origin``, optional ``crs``); it adds ``map -> world`` and ``/gnss/fix``.
+    ``accuracy`` is the (horizontal, vertical) 1-sigma in metres for the fix covariance.
+    """
     files = sorted(glob.glob(os.path.join(seq_dir, "radar", "*.pcd")))
     gt = load_ground_truth(seq_dir)
     if gt is not None and len(gt["t"]) != len(files):
@@ -214,7 +267,17 @@ def export_sequence(seq_dir, out_path, limit=None, progress=True):
     if limit is not None:
         files = files[:limit]
 
-    exporter = McapExporter(out_path)
+    topics = dict(TOPICS)
+    if georef is not None:
+        if gt is None:
+            raise ValueError(f"{seq_dir}: --georef needs ground_truth.csv")
+        T_utm_world = np.array(georef["T_utm_world"], dtype=float)
+        T_map_world = T_utm_world.copy()
+        T_map_world[:3, 3] -= georef["map_origin"]
+        lat, lon, alt = geo_positions(T_utm_world, gt["pose"][:, :3, 3], georef.get("crs", DEFAULT_GEO_CRS))
+        topics.update(GEO_TOPICS)
+
+    exporter = McapExporter(out_path, topics)
     try:
         for i, path in enumerate(files):
             pcd = load_pcd(path)
@@ -223,9 +286,10 @@ def export_sequence(seq_dir, out_path, limit=None, progress=True):
             fields = list(pcd)
 
             if i == 0:
-                exporter.write("/tf_static", ns, {"transforms": [
-                    _transform(ns, VEHICLE_FRAME, SENSOR_FRAME, T_sensor_vehicle)
-                ]})
+                static = [_transform(ns, VEHICLE_FRAME, SENSOR_FRAME, T_sensor_vehicle)]
+                if georef is not None:
+                    static.append(_transform(ns, MAP_FRAME, WORLD_FRAME, T_map_world))
+                exporter.write("/tf_static", ns, {"transforms": static})
                 if gt is not None:
                     # Ground-truth t is relative to the first radar frame by construction
                     stamps = ns + np.round(gt["t"][:len(files)] * 1e9).astype(np.int64)
@@ -252,6 +316,8 @@ def export_sequence(seq_dir, out_path, limit=None, progress=True):
                         "covariance": [0.0] * 36,
                     },
                 })
+                if georef is not None:
+                    exporter.write("/gnss/fix", ns, navsatfix_msg(ns, lat[i], lon[i], alt[i], *accuracy))
 
             if progress and (i % 500 == 0 or i == len(files) - 1):
                 print(f"\r  {i + 1}/{len(files)} frames", end="", flush=True)
@@ -268,15 +334,26 @@ def main():
     parser.add_argument("-o", "--out", default="mcap", help="Output directory (default: ./mcap)")
     parser.add_argument("--seq", nargs="+", help="Only these sequences (default: all)")
     parser.add_argument("--limit", type=int, help="Export only the first N frames of each sequence")
+    parser.add_argument("--georef", help="Decoded start-pose JSON: adds map -> world and /gnss/fix")
     args = parser.parse_args()
     if not os.path.isdir(args.path):
         parser.error(f"dataset path is not a directory: {args.path}")
+
+    georef, accuracy = {}, (2.0, 2.0)
+    if args.georef:
+        decoded = load_georef(args.georef)
+        georef = decoded["sequences"]
+        acc = decoded.get("meta", {}).get("accuracy_m", {})
+        accuracy = (acc.get("horizontal", 2.0), acc.get("vertical", 2.0))
 
     os.makedirs(args.out, exist_ok=True)
     for name in args.seq or discover_sequences(args.path):
         out_path = os.path.join(args.out, f"{name}.mcap")
         print(f"{name} -> {out_path}")
-        export_sequence(os.path.join(args.path, name), out_path, limit=args.limit)
+        if args.georef and name not in georef:
+            print(f"  warning: {name} has no entry in {args.georef}, exporting without map frame / fix")
+        export_sequence(os.path.join(args.path, name), out_path, limit=args.limit,
+                        georef=georef.get(name), accuracy=accuracy)
 
 
 if __name__ == "__main__":

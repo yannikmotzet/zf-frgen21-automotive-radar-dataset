@@ -324,6 +324,35 @@ stamped with the radar frame's `timestamp_ns`.
 frame. Ground-truth covariances are not provided by the dataset and are written
 as zeros.
 
+**Geographic start poses (optional).** Given a start pose per sequence,
+`--georef poses.json` (needs `pip install ".[geo]"`) additionally writes
+
+| Topic | Type | Content |
+|-------|------|---------|
+| `/tf_static` | `tf2_msgs/msg/TFMessage` | `map` → `world`: the sequence placed in a `map` frame shared by all sequences |
+| `/gnss/fix` | `sensor_msgs/msg/NavSatFix` | WGS 84 latitude/longitude/ellipsoidal height of `base_link`, approximated covariance |
+
+The TF tree becomes `map → world → base_link → radar`, so `map → base_link`
+can be looked up directly and overlapping sequences line up in `map`. The JSON
+holds one 4×4 `T_utm_world` per sequence (world frame → UTM grid coordinates
+E, N, ellipsoidal height) and the shared `map_origin`; `map` axes follow the
+UTM grid:
+
+```json
+{
+  "meta": {"accuracy_m": {"horizontal": 2.0, "vertical": 2.0}},
+  "sequences": {
+    "zf_01": {"crs": "EPSG:32632", "T_utm_world": [[...], [...], [...], [0, 0, 0, 1]],
+              "map_origin": [E, N, h]}
+  }
+}
+```
+
+`zf_radar.georef` can store such a file keyed by the dataset itself (each entry
+is obfuscated with a key derived from that sequence's `ground_truth.csv`) and
+decode it again with `python -m zf_radar.georef -p /path/to/ZF_Dataset --enc
+poses.enc`.
+
 ## License
 
 The loader and visualization software in this repository is released under the

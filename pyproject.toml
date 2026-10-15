@@ -26,6 +26,9 @@ mcap = [
     "mcap>=1.1",
     "mcap-ros2-support>=0.5",
 ]
+geo = [
+    "pyproj>=3.3",
+]
 
 [project.scripts]
 zf-radar-viz = "zf_radar.visualizer:main"

@@ -93,6 +93,48 @@ def test_round_trip(sequence, tmp_path):
     assert len(topics["/ground_truth/path"][0][1].poses) == 2
 
 
+def test_georef_topics(sequence, tmp_path):
+    pyproj = pytest.importorskip("pyproj")
+    seq, frames = sequence
+    yaw = np.radians(30)
+    T = np.eye(4)
+    T[:3, :3] = yaw_matrix(yaw)
+    T[:3, 3] = [535100.0, 5278200.0, 450.5]
+    georef = {"T_utm_world": T.tolist(), "map_origin": [535000.0, 5278000.0, 450.0]}
+    out = tmp_path / "geo.mcap"
+    export_sequence(str(seq), str(out), progress=False, georef=georef, accuracy=(2.0, 3.0))
+    topics = read_all(out)
+
+    static = {t.child_frame_id: t for t in topics["/tf_static"][0][1].transforms}
+    map_world = static["world"]
+    assert map_world.header.frame_id == "map"
+    translation = map_world.transform.translation
+    assert (translation.x, translation.y, translation.z) == pytest.approx((100.0, 200.0, 0.5))
+    assert map_world.transform.rotation.z == pytest.approx(np.sin(yaw / 2))
+    assert "radar" in static  # extrinsics still there
+
+    assert [t for t, _, _ in topics["/gnss/fix"]] == [frames[0][0], frames[1][0]]
+    fix = topics["/gnss/fix"][1][1]
+    # frame 1 sits at world (2.0, 0.5, 0)
+    E, N = np.array([535100.0, 5278200.0]) + yaw_matrix(yaw)[:2, :2] @ [2.0, 0.5]
+    lon, lat = pyproj.Transformer.from_crs("EPSG:32632", "EPSG:4326", always_xy=True).transform(E, N)
+    assert fix.latitude == pytest.approx(lat, abs=1e-9)
+    assert fix.longitude == pytest.approx(lon, abs=1e-9)
+    assert fix.altitude == pytest.approx(450.5)
+    assert fix.header.frame_id == "base_link"
+    assert fix.position_covariance_type == 1
+    assert [fix.position_covariance[i] for i in (0, 4, 8)] == pytest.approx([4.0, 4.0, 9.0])
+
+
+def test_without_georef_has_no_map_frame(sequence, tmp_path):
+    seq, _ = sequence
+    out = tmp_path / "plain.mcap"
+    export_sequence(str(seq), str(out), progress=False)
+    topics = read_all(out)
+    assert "/gnss/fix" not in topics
+    assert [t.child_frame_id for t in topics["/tf_static"][0][1].transforms] == ["radar"]
+
+
 @pytest.mark.parametrize("R", [
     np.eye(3),
     yaw_matrix(np.pi),  # trace < 0 branch

@@ -35,6 +35,6 @@ jobs:
           set -e
           echo "$out"
           [ $code -ne 0 ] && echo "$out" | grep -q "viz" || { echo "expected clean [viz] hint"; exit 1; }
-      # Exporter and plot tests are skipped above without their extras; run them now
-      - run: pip install ".[mcap,plot]"
+      # Exporter, plot and georef-export tests are skipped above without their extras; run them now
+      - run: pip install ".[mcap,plot,geo]"
       - run: pytest tests/ -v
