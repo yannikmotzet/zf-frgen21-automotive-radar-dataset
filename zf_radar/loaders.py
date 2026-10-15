@@ -9,27 +9,16 @@ import re
 import numpy as np
 
 
-def load_pcd(path: str) -> dict[str, np.ndarray]:
-    """
-    Load an ASCII PCD file to dictionary.
-
-    Args:
-        path: Path to the PCD file.
-
-    Returns:
-        dict: Dictionary containing the point cloud data.
-    """
-    fields = []
-    num_points = 0
-    header_lines = 0
-    meta = {}
-    data_format = None
+def _read_pcd_header(path: str) -> dict:
+    """Parse a PCD header up to the DATA line without touching the payload."""
+    header = {"meta": {}, "fields": [], "num_points": 0, "header_lines": 0, "data_format": None}
+    meta = header["meta"]
 
     # errors="replace" keeps the header scan alive on binary payloads, which the
     # line iterator may read ahead into before we break at DATA
     with open(path, "r", errors="replace") as f:
         for line in f:
-            header_lines += 1
+            header["header_lines"] += 1
             stripped = line.strip()
             if stripped.startswith("# ") and " " in stripped[2:]:
                 parts = stripped[2:].split(None, 1)
@@ -44,13 +33,43 @@ def load_pcd(path: str) -> dict[str, np.ndarray]:
                         except ValueError:
                             pass
             elif stripped.startswith("FIELDS"):
-                fields = stripped.split()[1:]
+                header["fields"] = stripped.split()[1:]
             elif stripped.startswith("POINTS"):
-                num_points = int(stripped.split()[1])
+                header["num_points"] = int(stripped.split()[1])
             elif stripped.startswith("DATA"):
                 parts = stripped.split()
-                data_format = parts[1] if len(parts) > 1 else None
+                header["data_format"] = parts[1] if len(parts) > 1 else None
                 break
+    return header
+
+
+def load_pcd_meta(path: str) -> dict:
+    """
+    Read only the header of a PCD file — much faster than ``load_pcd`` when
+    per-frame metadata is all that is needed.
+
+    Returns:
+        dict: The comment-line metadata (``timestamp_ns``, ``velocity_ambiguity``)
+        plus ``num_points`` and ``fields``.
+    """
+    header = _read_pcd_header(path)
+    return {**header["meta"], "num_points": header["num_points"], "fields": header["fields"]}
+
+
+def load_pcd(path: str) -> dict[str, np.ndarray]:
+    """
+    Load an ASCII PCD file to dictionary.
+
+    Args:
+        path: Path to the PCD file.
+
+    Returns:
+        dict: Dictionary containing the point cloud data.
+    """
+    header = _read_pcd_header(path)
+    fields = header["fields"]
+    num_points = header["num_points"]
+    data_format = header["data_format"]
 
     if data_format != "ascii":
         raise ValueError(f"{path}: only 'DATA ascii' PCD files are supported, got 'DATA {data_format}'")
@@ -58,11 +77,11 @@ def load_pcd(path: str) -> dict[str, np.ndarray]:
     if num_points == 0:
         data = np.zeros((0, len(fields)))
     else:
-        data = np.loadtxt(path, skiprows=header_lines, max_rows=num_points)
+        data = np.loadtxt(path, skiprows=header["header_lines"], max_rows=num_points)
         if data.ndim == 1:
             data = data.reshape(1, -1)
 
-    result = {"_meta": meta}
+    result = {"_meta": header["meta"]}
     for i, name in enumerate(fields):
         result[name] = data[:, i] if data.shape[0] > 0 else np.array([])
     return result
@@ -109,11 +128,16 @@ def load_extrinsics(seq_dir: str) -> np.ndarray:
     )
 
 
-def load_poses(seq_dir):
+def load_ground_truth(seq_dir):
     """
-    Load ground_truth.csv if it exists. Returns (N,4,4) transforms or None.
+    Load ground_truth.csv if it exists, with all columns. Returns a dict or None.
 
     Expects KITTI format rows: t, T00..T23, vx, vy, vz, wx, wy, wz.
+
+    Returns:
+        dict with ``t`` (N,) seconds since sequence start, ``pose`` (N,4,4)
+        vehicle-to-world transforms, ``v_body`` (N,3) linear velocity in m/s and
+        ``w_body`` (N,3) angular velocity in rad/s, both in the vehicle frame.
     """
     csv_path = os.path.join(seq_dir, "ground_truth.csv")
     if not os.path.exists(csv_path):
@@ -130,7 +154,17 @@ def load_poses(seq_dir):
     pose = np.zeros((len(data), 4, 4))
     pose[:, :3, :4] = data[:, 1:13].reshape(-1, 3, 4)
     pose[:, 3, 3] = 1.0
-    return pose
+    return {"t": data[:, 0], "pose": pose, "v_body": data[:, 13:16], "w_body": data[:, 16:19]}
+
+
+def load_poses(seq_dir):
+    """
+    Load ground_truth.csv if it exists. Returns (N,4,4) transforms or None.
+
+    Expects KITTI format rows: t, T00..T23, vx, vy, vz, wx, wy, wz.
+    """
+    gt = load_ground_truth(seq_dir)
+    return None if gt is None else gt["pose"]
 
 
 def discover_sequences(dataset_dir):

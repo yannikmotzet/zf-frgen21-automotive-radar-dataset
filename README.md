@@ -143,7 +143,10 @@ doppler = points["velocity"]         # m/s, negative = approaching
 
 This repo ships the same reader (plus pose/extrinsics/sequence helpers) as a
 numpy-only package — `pip install .` then `from zf_radar import load_pcd,
-load_poses, load_extrinsics, discover_sequences`.
+load_pcd_meta, load_poses, load_ground_truth, load_extrinsics,
+discover_sequences`. `load_pcd_meta` reads only the header (timestamp,
+`velocity_ambiguity`, point count), which is much faster when scanning a whole
+sequence; `load_ground_truth` returns time, poses and body-frame velocities.
 
 ## Ground truth (`ground_truth.csv`)
 

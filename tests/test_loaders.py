@@ -3,7 +3,14 @@
 import numpy as np
 import pytest
 
-from zf_radar.loaders import discover_sequences, load_extrinsics, load_pcd, load_poses
+from zf_radar.loaders import (
+    discover_sequences,
+    load_extrinsics,
+    load_ground_truth,
+    load_pcd,
+    load_pcd_meta,
+    load_poses,
+)
 
 
 PCD_HEADER = """\
@@ -65,6 +72,23 @@ class TestLoadPcd:
             load_pcd(str(pcd))
 
 
+class TestLoadPcdMeta:
+    def test_header_only(self, tmp_path):
+        pcd = tmp_path / "f.pcd"
+        write_pcd(pcd, [[1.0, 2.0, 3.0, 25.0], [4.0, 5.0, 6.0, 30.0]])
+        meta = load_pcd_meta(str(pcd))
+        assert meta["timestamp_ns"] == 1624006954674470229
+        assert meta["velocity_ambiguity"] == pytest.approx(32.499187)
+        assert meta["num_points"] == 2
+        assert meta["fields"] == ["x", "y", "z", "snr"]
+
+    def test_binary_payload_ok(self, tmp_path):
+        pcd = tmp_path / "f.pcd"
+        header = PCD_HEADER.format(n=1, fmt="binary").encode()
+        pcd.write_bytes(header + b"\xd9\xfe\x00\x12" * 4)
+        assert load_pcd_meta(str(pcd))["num_points"] == 1
+
+
 class TestLoadExtrinsics:
     HEADER = "T00,T01,T02,T03,T10,T11,T12,T13,T20,T21,T22,T23\n"
     ROW = "1,0,0,3.925,0,1,0,0,0,0,1,0\n"
@@ -119,6 +143,16 @@ class TestLoadPoses:
 
     def test_missing_returns_none(self, tmp_path):
         assert load_poses(str(tmp_path)) is None
+        assert load_ground_truth(str(tmp_path)) is None
+
+    def test_ground_truth_columns(self, tmp_path):
+        header = "t," + ",".join(f"c{i}" for i in range(18)) + "\n"
+        (tmp_path / "ground_truth.csv").write_text(header + self.row(0.0, 0.0) + self.row(0.09, 0.45))
+        gt = load_ground_truth(str(tmp_path))
+        np.testing.assert_array_equal(gt["t"], [0.0, 0.09])
+        assert gt["pose"].shape == (2, 4, 4)
+        np.testing.assert_array_equal(gt["v_body"][1], [5, 0, 0])
+        np.testing.assert_array_equal(gt["w_body"][1], [0, 0, 0.1])
 
     def test_wrong_columns_raises(self, tmp_path):
         (tmp_path / "ground_truth.csv").write_text("a,b\n1,2\n3,4\n")
