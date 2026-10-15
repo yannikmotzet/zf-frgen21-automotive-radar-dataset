@@ -52,6 +52,16 @@ with `zf-radar-plot` (`summary.csv`).
 Routes in each sequence's local world frame, colored by speed (generated with
 `zf-radar-plot`, see [Route plots and statistics](#route-plots-and-statistics)).
 
+![All six routes on an OpenStreetMap base map around Friedrichshafen](docs/routes_map.png)
+
+Approximate location of all routes in and around Friedrichshafen. The dataset
+contains no geodetic coordinates; the placement was reconstructed by matching
+the ground-truth trajectories against OpenStreetMap roads (and a terrain model
+for height) and is accurate to a few metres. Several sequences share roads —
+`zf_02`/`zf_05` in the south of Friedrichshafen and `zf_05`/`zf_06` towards
+Löwental — and others cross, which makes them useful for cross-sequence
+localization and loop closure. Map data © OpenStreetMap contributors (ODbL).
+
 ## Directory layout
 
 ```
