@@ -13,6 +13,10 @@ With ``--georef poses.json`` (start pose per sequence, see zf_radar.georef) also
     /tf_static                  map -> odom_ins               sequence start placed in the shared map frame
     /gnss/fix                   sensor_msgs/msg/NavSatFix     WGS 84 position of base_link per frame
 
+With ``--unwrap-doppler`` (radar-only de-aliasing, see zf_radar.doppler) also:
+    /radar/points               + velocity_unwrapped (float32), wrap_k, unwrap_status (int8)
+    /radar/ego_velocity         geometry_msgs/msg/TwistStamped  radar-only sensor velocity, frame "radar"
+
 Only needs ``mcap`` and ``mcap-ros2-support`` — no ROS installation (``pyproj``
 for ``--georef``). The files open in Foxglove and play back with
 ``ros2 bag play -s mcap <file>``.
@@ -33,6 +37,7 @@ except ImportError as e:
         '  pip install "zf-frgen21-radar-dataset[mcap]"'
     ) from e
 
+from zf_radar.doppler import unwrap_sequence
 from zf_radar.georef import load_georef
 from zf_radar.loaders import discover_sequences, load_extrinsics, load_ground_truth, load_pcd
 
@@ -103,6 +108,10 @@ MSGDEFS = {
         "int8 STATUS_GBAS_FIX=2\nint8 status\nuint16 SERVICE_GPS=1\nuint16 SERVICE_GLONASS=2\n"
         "uint16 SERVICE_COMPASS=4\nuint16 SERVICE_GALILEO=8\nuint16 service",
     ),
+    "geometry_msgs/msg/TwistStamped": _msgdef(
+        "std_msgs/Header header\nTwist twist",
+        _HEADER, _TIME, "MSG: geometry_msgs/Twist\nVector3 linear\nVector3 angular", _VECTOR3,
+    ),
     "nav_msgs/msg/Path": _msgdef(
         "std_msgs/Header header\ngeometry_msgs/PoseStamped[] poses",
         _HEADER, _TIME, _POSE_STAMPED, _POSE, _POINT, _QUAT,
@@ -133,7 +142,12 @@ TOPICS = {
 GEO_TOPICS = {
     "/gnss/fix": ("sensor_msgs/msg/NavSatFix", QOS_VOLATILE),
 }
+UNWRAP_TOPICS = {
+    "/radar/ego_velocity": ("geometry_msgs/msg/TwistStamped", QOS_VOLATILE),
+}
+UNWRAP_FIELDS = ("velocity_unwrapped", "wrap_k", "unwrap_status")
 
+POINTFIELD_INT8 = 1
 POINTFIELD_FLOAT32 = 7
 NAVSAT_COVARIANCE_APPROXIMATED = 1
 DEFAULT_GEO_CRS = "EPSG:32632"
@@ -181,23 +195,24 @@ def _transform(ns, parent, child, T):
 
 
 def pointcloud_msg(ns, pcd, fields):
-    """PointCloud2 with every PCD field packed as little-endian float32."""
+    """PointCloud2, packed: int8 arrays stay int8, everything else becomes little-endian float32."""
     n = len(pcd[fields[0]])
-    packed = np.empty((n, len(fields)), dtype="<f4")
-    for i, name in enumerate(fields):
-        packed[:, i] = pcd[name]
-    point_step = 4 * len(fields)
+    types = [("<i1", POINTFIELD_INT8) if np.asarray(pcd[f]).dtype == np.int8 else ("<f4", POINTFIELD_FLOAT32)
+             for f in fields]
+    packed = np.empty(n, dtype=np.dtype([(f, t) for f, (t, _) in zip(fields, types)]))
+    for name in fields:
+        packed[name] = pcd[name]
     return {
         "header": {"stamp": _stamp(ns), "frame_id": SENSOR_FRAME},
         "height": 1,
         "width": n,
         "fields": [
-            {"name": name, "offset": 4 * i, "datatype": POINTFIELD_FLOAT32, "count": 1}
-            for i, name in enumerate(fields)
+            {"name": name, "offset": packed.dtype.fields[name][1], "datatype": code, "count": 1}
+            for name, (_, code) in zip(fields, types)
         ],
         "is_bigendian": False,
-        "point_step": point_step,
-        "row_step": point_step * n,
+        "point_step": packed.dtype.itemsize,
+        "row_step": packed.dtype.itemsize * n,
         "data": packed.tobytes(),
         "is_dense": True,
     }
@@ -255,8 +270,12 @@ def navsatfix_msg(ns, lat, lon, alt, sigma_h, sigma_v):
     }
 
 
-def export_sequence(seq_dir, out_path, limit=None, progress=True, georef=None, accuracy=(2.0, 2.0)):
+def export_sequence(seq_dir, out_path, limit=None, progress=True, georef=None, accuracy=(2.0, 2.0),
+                    unwrap_doppler=False):
     """Write one sequence to ``out_path``. Returns the number of radar frames written.
+
+    ``unwrap_doppler`` adds de-aliased radial velocities to the point cloud and
+    the radar-only ego velocity as ``/radar/ego_velocity`` (no ground truth used).
 
     ``georef`` is one sequence entry of a decoded georef file (``T_utm_world``,
     ``map_origin``, optional ``crs``); it adds ``map -> odom_ins`` and ``/gnss/fix``.
@@ -279,14 +298,23 @@ def export_sequence(seq_dir, out_path, limit=None, progress=True, georef=None, a
         T_map_odom[:3, 3] -= georef["map_origin"]
         lat, lon, alt = geo_positions(T_utm_world, gt["pose"][:, :3, 3], georef.get("crs", DEFAULT_GEO_CRS))
         topics.update(GEO_TOPICS)
+    if unwrap_doppler:
+        topics.update(UNWRAP_TOPICS)
 
+    frames = (load_pcd(path) for path in files)
+    stream = unwrap_sequence(frames) if unwrap_doppler else ((f, None) for f in frames)
     exporter = McapExporter(out_path, topics)
     try:
-        for i, path in enumerate(files):
-            pcd = load_pcd(path)
-            meta = pcd.pop("_meta")
+        for i, (pcd, unwrapped) in enumerate(stream):
+            # keep pcd["_meta"]: the unwrapper reuses this frame as the next one's partner
+            meta = pcd["_meta"]
             ns = meta["timestamp_ns"]
-            fields = list(pcd)
+            fields = [f for f in pcd if f != "_meta"]
+            cloud = {f: pcd[f] for f in fields}
+            if unwrapped is not None:
+                for f in UNWRAP_FIELDS:
+                    cloud[f] = unwrapped[f]
+                fields += list(UNWRAP_FIELDS)
 
             if i == 0:
                 static = [_transform(ns, VEHICLE_FRAME, SENSOR_FRAME, T_sensor_vehicle)]
@@ -304,8 +332,13 @@ def export_sequence(seq_dir, out_path, limit=None, progress=True, georef=None, a
                         ],
                     })
 
-            exporter.write("/radar/points", ns, pointcloud_msg(ns, pcd, fields))
+            exporter.write("/radar/points", ns, pointcloud_msg(ns, cloud, fields))
             exporter.write("/radar/velocity_ambiguity", ns, {"data": float(meta["velocity_ambiguity"])})
+            if unwrapped is not None:
+                exporter.write("/radar/ego_velocity", ns, {
+                    "header": {"stamp": _stamp(ns), "frame_id": SENSOR_FRAME},
+                    "twist": {"linear": _xyz(unwrapped["sensor_velocity"]), "angular": _xyz((0.0, 0.0, 0.0))},
+                })
 
             if gt is not None:
                 T = gt["pose"][i]
@@ -338,6 +371,8 @@ def main():
     parser.add_argument("--seq", nargs="+", help="Only these sequences (default: all)")
     parser.add_argument("--limit", type=int, help="Export only the first N frames of each sequence")
     parser.add_argument("--georef", help="Decoded start-pose JSON: adds map -> odom_ins and /gnss/fix")
+    parser.add_argument("--unwrap-doppler", action="store_true",
+                        help="Add de-aliased Doppler fields and /radar/ego_velocity (radar-only)")
     args = parser.parse_args()
     if not os.path.isdir(args.path):
         parser.error(f"dataset path is not a directory: {args.path}")
@@ -356,7 +391,7 @@ def main():
         if args.georef and name not in georef:
             print(f"  warning: {name} has no entry in {args.georef}, exporting without map frame / fix")
         export_sequence(os.path.join(args.path, name), out_path, limit=args.limit,
-                        georef=georef.get(name), accuracy=accuracy)
+                        georef=georef.get(name), accuracy=accuracy, unwrap_doppler=args.unwrap_doppler)
 
 
 if __name__ == "__main__":

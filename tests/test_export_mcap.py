@@ -138,6 +138,31 @@ def test_without_georef_has_no_map_frame(sequence, tmp_path):
     assert [t.child_frame_id for t in topics["/tf_static"][0][1].transforms] == ["radar"]
 
 
+def test_unwrap_doppler_fields(sequence, tmp_path):
+    seq, frames = sequence
+    out = tmp_path / "unwrap.mcap"
+    export_sequence(str(seq), str(out), progress=False, unwrap_doppler=True)
+    topics = read_all(out)
+
+    cloud = topics["/radar/points"][0][1]
+    names = [f.name for f in cloud.fields]
+    assert names == ["x", "y", "z", "velocity", "snr", "velocity_unwrapped", "wrap_k", "unwrap_status"]
+    types = {f.name: f.datatype for f in cloud.fields}
+    assert (types["velocity_unwrapped"], types["wrap_k"], types["unwrap_status"]) == (7, 1, 1)
+    assert cloud.point_step == 4 * 6 + 2
+
+    # packed layout: 6 float32 then 2 int8 per point
+    dtype = np.dtype([(n, "<f4") for n in names[:6]] + [("wrap_k", "i1"), ("unwrap_status", "i1")])
+    pts = np.frombuffer(bytes(cloud.data), dtype=dtype)
+    np.testing.assert_allclose(pts["x"], [p[0] for p in frames[0][2]], rtol=1e-6)
+    # fewer than 3 points: nothing can be resolved, measured value is kept
+    np.testing.assert_allclose(pts["velocity_unwrapped"], pts["velocity"])
+    assert list(pts["unwrap_status"]) == [0, 0]
+
+    assert [t for t, _, _ in topics["/radar/ego_velocity"]] == [frames[0][0], frames[1][0]]
+    assert topics["/radar/ego_velocity"][0][1].header.frame_id == "radar"
+
+
 @pytest.mark.parametrize("R", [
     np.eye(3),
     yaw_matrix(np.pi),  # trace < 0 branch
