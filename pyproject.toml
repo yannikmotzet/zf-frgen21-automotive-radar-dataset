@@ -22,10 +22,15 @@ viz = [
 plot = [
     "matplotlib>=3.5",
 ]
+mcap = [
+    "mcap>=1.1",
+    "mcap-ros2-support>=0.5",
+]
 
 [project.scripts]
 zf-radar-viz = "zf_radar.visualizer:main"
 zf-radar-plot = "zf_radar.plots:main"
+zf-radar-mcap = "zf_radar.export_mcap:main"
 
 [tool.setuptools]
 packages = ["zf_radar"]

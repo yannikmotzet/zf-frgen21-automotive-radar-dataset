@@ -247,6 +247,32 @@ static targets straight ahead show wrapped Doppler. Routes are drawn in each
 sequence's local world frame — the dataset contains no geodetic coordinates,
 so sequences cannot be placed on a map or relative to each other.
 
+## ROS 2 MCAP export
+
+```bash
+pip install ".[mcap]"
+zf-radar-mcap -p /path/to/ZF_Dataset -o mcap/           # all sequences
+zf-radar-mcap -p /path/to/ZF_Dataset --seq zf_01 --limit 500   # quick test
+```
+
+Writes one ROS 2 MCAP file per sequence (zstd-compressed). No ROS installation
+is needed for the export; the files open in [Foxglove](https://foxglove.dev)
+and play back with `ros2 bag play -s mcap mcap/zf_01.mcap`. All messages are
+stamped with the radar frame's `timestamp_ns`.
+
+| Topic | Type | Content |
+|-------|------|---------|
+| `/radar/points` | `sensor_msgs/msg/PointCloud2` | All PCD fields as float32, frame `radar` |
+| `/radar/velocity_ambiguity` | `std_msgs/msg/Float32` | Unambiguous Doppler interval [m/s] of the frame |
+| `/ground_truth/odom` | `nav_msgs/msg/Odometry` | Pose `world` → `base_link`, twist in `base_link` |
+| `/ground_truth/path` | `nav_msgs/msg/Path` | Full trajectory, written once (transient local) |
+| `/tf` | `tf2_msgs/msg/TFMessage` | `world` → `base_link` per frame |
+| `/tf_static` | `tf2_msgs/msg/TFMessage` | `base_link` → `radar` from `extrinsics.csv` (transient local) |
+
+`base_link` is the vehicle frame (rear axle), `world` the sequence's world
+frame. Ground-truth covariances are not provided by the dataset and are written
+as zeros.
+
 ## License
 
 The loader and visualization software in this repository is released under the
