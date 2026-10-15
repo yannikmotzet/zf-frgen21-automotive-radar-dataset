@@ -100,7 +100,8 @@ DATA ascii
 
 **Doppler ambiguity.** Measured radial velocities wrap into the interval
 ±`velocity_ambiguity`/2. The sensor alternates between two scan modes on
-consecutive frames with different ambiguity ranges (≈32.5 and ≈43.6 m/s),
+consecutive frames with different ambiguity ranges (≈32.5 and ≈43.6 m/s;
+31.97 and 42.63 m/s in `zf_05`, which uses a different chirp configuration),
 so the unambiguous interval changes frame to frame — always read it from the
 frame header. Observed field of view is roughly ±50° azimuth, ±15° elevation,
 with detections out to ~100 m.
@@ -147,6 +148,44 @@ load_pcd_meta, load_poses, load_ground_truth, load_extrinsics,
 discover_sequences`. `load_pcd_meta` reads only the header (timestamp,
 `velocity_ambiguity`, point count), which is much faster when scanning a whole
 sequence; `load_ground_truth` returns time, poses and body-frame velocities.
+
+## Frame timing
+
+The following was measured from the published timestamps
+(`scripts/analyze_timing.py`); it is not part of the official dataset
+documentation.
+
+![Frame timing: alternating chirp sequences of different length, timestamps at the sequence midpoints](docs/frame_timing.svg)
+
+- **Fixed frame cycle, alternating modes.** Frames are emitted on a 90 ms
+  cycle and the two scan modes strictly alternate (every sequence, no
+  exceptions). Averaged over a sequence the cycle is 90.0000 ms within
+  ±0.15 ppm of GPS time.
+- **Timestamps alternate 86.1 / 94.0 ms.** Because `timestamp_ns` marks the
+  *midpoint* of the chirp sequence and the low-ambiguity mode (≈32.5 m/s,
+  longer chirp repetition interval) chirps ≈7.9 ms longer than the
+  high-ambiguity mode, the midpoint sits at a mode-dependent offset within the
+  cycle. The interval from a low- to a high-ambiguity frame is ≈86.1 ms, the
+  reverse ≈94.0 ms; a pair always spans 180 ms. In `zf_05` the difference is
+  7.56 ms (86.2 / 93.8 ms). Assuming both modes use the same chirp count and
+  a 76.5 GHz carrier, the sequences last roughly 31 ms and 23 ms.
+- **Sawtooth from clock resyncs.** Relative to the ideal grid the timestamps
+  drift at about −65 ppm (≈1 ms over 15 s) and step back roughly every 15.7 s
+  (13.6 s in `zf_05`); the frame right at a step is often ≈1.8 ms late.
+  Residuals stay within ±0.9 ms (99th percentile).
+- **Skipped cycles in `zf_05`.** At 7 places one 90 ms cycle is missing (an
+  interval of ≈166 ms, preceded by a frame ≈10 ms late at ≈103.7 ms). The
+  modes still alternate across the gap, so this is not a frame dropped in
+  post-processing — the sensor apparently skipped a cycle.
+
+In practice: always use the per-frame `timestamp_ns` (never assume a fixed
+`dt`). Within one frame the vehicle keeps moving during the chirp sequence —
+at 99 km/h about 0.85 m over ≈31 ms, i.e. ±0.4 m around the timestamped
+midpoint.
+
+```bash
+python scripts/analyze_timing.py -p /path/to/ZF_Dataset
+```
 
 ## Ground truth (`ground_truth.csv`)
 
