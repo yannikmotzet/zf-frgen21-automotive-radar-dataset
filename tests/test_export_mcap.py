@@ -87,6 +87,9 @@ def test_round_trip(sequence, tmp_path):
     assert "durability: 1" in topics["/tf_static"][0][2].metadata["offered_qos_profiles"]
 
     odom = topics["/ground_truth/odom"][1][1]
+    assert (odom.header.frame_id, odom.child_frame_id) == ("odom_ins", "base_link")
+    tf = topics["/tf"][0][1].transforms[0]
+    assert (tf.header.frame_id, tf.child_frame_id) == ("odom_ins", "base_link")
     assert odom.pose.pose.position.x == pytest.approx(2.0)
     assert odom.pose.pose.orientation.z == pytest.approx(np.sin(0.15))
     assert odom.twist.twist.linear.x == pytest.approx(5.0)
@@ -106,16 +109,16 @@ def test_georef_topics(sequence, tmp_path):
     topics = read_all(out)
 
     static = {t.child_frame_id: t for t in topics["/tf_static"][0][1].transforms}
-    map_world = static["world"]
-    assert map_world.header.frame_id == "map"
-    translation = map_world.transform.translation
+    map_odom = static["odom_ins"]
+    assert map_odom.header.frame_id == "map"
+    translation = map_odom.transform.translation
     assert (translation.x, translation.y, translation.z) == pytest.approx((100.0, 200.0, 0.5))
-    assert map_world.transform.rotation.z == pytest.approx(np.sin(yaw / 2))
+    assert map_odom.transform.rotation.z == pytest.approx(np.sin(yaw / 2))
     assert "radar" in static  # extrinsics still there
 
     assert [t for t, _, _ in topics["/gnss/fix"]] == [frames[0][0], frames[1][0]]
     fix = topics["/gnss/fix"][1][1]
-    # frame 1 sits at world (2.0, 0.5, 0)
+    # frame 1 sits at odom_ins (2.0, 0.5, 0)
     E, N = np.array([535100.0, 5278200.0]) + yaw_matrix(yaw)[:2, :2] @ [2.0, 0.5]
     lon, lat = pyproj.Transformer.from_crs("EPSG:32632", "EPSG:4326", always_xy=True).transform(E, N)
     assert fix.latitude == pytest.approx(lat, abs=1e-9)

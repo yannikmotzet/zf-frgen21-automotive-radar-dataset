@@ -325,28 +325,42 @@ stamped with the radar frame's `timestamp_ns`.
 |-------|------|---------|
 | `/radar/points` | `sensor_msgs/msg/PointCloud2` | All PCD fields as float32, frame `radar` |
 | `/radar/velocity_ambiguity` | `std_msgs/msg/Float32` | Unambiguous Doppler interval [m/s] of the frame |
-| `/ground_truth/odom` | `nav_msgs/msg/Odometry` | Pose `world` → `base_link`, twist in `base_link` |
+| `/ground_truth/odom` | `nav_msgs/msg/Odometry` | Pose `odom_ins` → `base_link`, twist in `base_link` |
 | `/ground_truth/path` | `nav_msgs/msg/Path` | Full trajectory, written once (transient local) |
-| `/tf` | `tf2_msgs/msg/TFMessage` | `world` → `base_link` per frame |
+| `/tf` | `tf2_msgs/msg/TFMessage` | `odom_ins` → `base_link` per frame |
 | `/tf_static` | `tf2_msgs/msg/TFMessage` | `base_link` → `radar` from `extrinsics.csv` (transient local) |
 
-`base_link` is the vehicle frame (rear axle), `world` the sequence's world
-frame. Ground-truth covariances are not provided by the dataset and are written
-as zeros.
+Frames follow [REP-105](https://www.ros.org/reps/rep-0105.html): `base_link` is
+the vehicle frame (rear axle) and `odom_ins` is an odometry frame whose source
+is the INS ground truth — it is the dataset's world frame (vehicle pose at the
+first frame), so `odom_ins → base_link` equals `ground_truth.csv`. Note that it
+inherits the vehicle's roll/pitch at the first frame, i.e. its z axis is not
+exactly vertical. Ground-truth covariances are not provided by the dataset and
+are written as zeros.
+
+To compare your own estimate (e.g. radar odometry) against the ground truth,
+publish it in its own branch such as `odom_radar → base_link_radar` rather than
+a second parent for `base_link`.
 
 **Geographic start poses (optional).** Given a start pose per sequence,
 `--georef poses.json` (needs `pip install ".[geo]"`) additionally writes
 
 | Topic | Type | Content |
 |-------|------|---------|
-| `/tf_static` | `tf2_msgs/msg/TFMessage` | `map` → `world`: the sequence placed in a `map` frame shared by all sequences |
+| `/tf_static` | `tf2_msgs/msg/TFMessage` | `map` → `odom_ins`: the sequence start placed in a `map` frame shared by all sequences |
 | `/gnss/fix` | `sensor_msgs/msg/NavSatFix` | WGS 84 latitude/longitude/ellipsoidal height of `base_link`, approximated covariance |
 
-The TF tree becomes `map → world → base_link → radar`, so `map → base_link`
-can be looked up directly and overlapping sequences line up in `map`. The JSON
-holds one 4×4 `T_utm_world` per sequence (world frame → UTM grid coordinates
-E, N, ellipsoidal height) and the shared `map_origin`; `map` axes follow the
-UTM grid:
+The TF tree becomes `map → odom_ins → base_link → radar`, so `map → base_link`
+can be looked up directly and overlapping sequences line up in `map`. `map` is
+a local frame with small coordinates: its axes follow the UTM grid and its
+origin is the fixed `map_origin` (UTM E, N, ellipsoidal height) from the pose
+file, the same for all sequences — UTM coordinates are `map` coordinates plus
+`map_origin`. For visualization use `map` (or `odom_ins`) as fixed frame; for
+a map overlay in Foxglove, add a Map panel on `/gnss/fix`.
+
+The JSON holds one 4×4 `T_utm_world` per sequence (dataset world frame, i.e.
+`odom_ins` → UTM grid coordinates E, N, ellipsoidal height) and the shared
+`map_origin`:
 
 ```json
 {

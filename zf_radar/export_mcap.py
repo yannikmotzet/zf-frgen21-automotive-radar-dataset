@@ -4,13 +4,13 @@
 Topics (all stamped with the radar frame's ``timestamp_ns``):
     /radar/points               sensor_msgs/msg/PointCloud2   all PCD fields as float32, frame "radar"
     /radar/velocity_ambiguity   std_msgs/msg/Float32          unambiguous Doppler interval [m/s]
-    /ground_truth/odom          nav_msgs/msg/Odometry         world -> base_link, twist in base_link
+    /ground_truth/odom          nav_msgs/msg/Odometry         odom_ins -> base_link, twist in base_link
     /ground_truth/path          nav_msgs/msg/Path             full trajectory, once at start
-    /tf                         tf2_msgs/msg/TFMessage        world -> base_link per frame
+    /tf                         tf2_msgs/msg/TFMessage        odom_ins -> base_link per frame
     /tf_static                  tf2_msgs/msg/TFMessage        base_link -> radar (extrinsics), once
 
 With ``--georef poses.json`` (start pose per sequence, see zf_radar.georef) also:
-    /tf_static                  map -> world                  world placed in the shared map frame
+    /tf_static                  map -> odom_ins               sequence start placed in the shared map frame
     /gnss/fix                   sensor_msgs/msg/NavSatFix     WGS 84 position of base_link per frame
 
 Only needs ``mcap`` and ``mcap-ros2-support`` — no ROS installation (``pyproj``
@@ -37,7 +37,10 @@ from zf_radar.georef import load_georef
 from zf_radar.loaders import discover_sequences, load_extrinsics, load_ground_truth, load_pcd
 
 MAP_FRAME = "map"
-WORLD_FRAME = "world"
+# REP-105 odometry frame whose source is the INS ground truth; it is the dataset's
+# "world" frame (vehicle pose at the first frame). Own estimates (e.g. radar
+# odometry) can live next to it as odom_radar -> base_link_radar.
+ODOM_FRAME = "odom_ins"
 VEHICLE_FRAME = "base_link"
 SENSOR_FRAME = "radar"
 
@@ -256,7 +259,7 @@ def export_sequence(seq_dir, out_path, limit=None, progress=True, georef=None, a
     """Write one sequence to ``out_path``. Returns the number of radar frames written.
 
     ``georef`` is one sequence entry of a decoded georef file (``T_utm_world``,
-    ``map_origin``, optional ``crs``); it adds ``map -> world`` and ``/gnss/fix``.
+    ``map_origin``, optional ``crs``); it adds ``map -> odom_ins`` and ``/gnss/fix``.
     ``accuracy`` is the (horizontal, vertical) 1-sigma in metres for the fix covariance.
     """
     files = sorted(glob.glob(os.path.join(seq_dir, "radar", "*.pcd")))
@@ -272,8 +275,8 @@ def export_sequence(seq_dir, out_path, limit=None, progress=True, georef=None, a
         if gt is None:
             raise ValueError(f"{seq_dir}: --georef needs ground_truth.csv")
         T_utm_world = np.array(georef["T_utm_world"], dtype=float)
-        T_map_world = T_utm_world.copy()
-        T_map_world[:3, 3] -= georef["map_origin"]
+        T_map_odom = T_utm_world.copy()
+        T_map_odom[:3, 3] -= georef["map_origin"]
         lat, lon, alt = geo_positions(T_utm_world, gt["pose"][:, :3, 3], georef.get("crs", DEFAULT_GEO_CRS))
         topics.update(GEO_TOPICS)
 
@@ -288,15 +291,15 @@ def export_sequence(seq_dir, out_path, limit=None, progress=True, georef=None, a
             if i == 0:
                 static = [_transform(ns, VEHICLE_FRAME, SENSOR_FRAME, T_sensor_vehicle)]
                 if georef is not None:
-                    static.append(_transform(ns, MAP_FRAME, WORLD_FRAME, T_map_world))
+                    static.append(_transform(ns, MAP_FRAME, ODOM_FRAME, T_map_odom))
                 exporter.write("/tf_static", ns, {"transforms": static})
                 if gt is not None:
                     # Ground-truth t is relative to the first radar frame by construction
                     stamps = ns + np.round(gt["t"][:len(files)] * 1e9).astype(np.int64)
                     exporter.write("/ground_truth/path", ns, {
-                        "header": {"stamp": _stamp(ns), "frame_id": WORLD_FRAME},
+                        "header": {"stamp": _stamp(ns), "frame_id": ODOM_FRAME},
                         "poses": [
-                            {"header": {"stamp": _stamp(int(s)), "frame_id": WORLD_FRAME}, "pose": _pose(T)}
+                            {"header": {"stamp": _stamp(int(s)), "frame_id": ODOM_FRAME}, "pose": _pose(T)}
                             for s, T in zip(stamps, gt["pose"])
                         ],
                     })
@@ -306,9 +309,9 @@ def export_sequence(seq_dir, out_path, limit=None, progress=True, georef=None, a
 
             if gt is not None:
                 T = gt["pose"][i]
-                exporter.write("/tf", ns, {"transforms": [_transform(ns, WORLD_FRAME, VEHICLE_FRAME, T)]})
+                exporter.write("/tf", ns, {"transforms": [_transform(ns, ODOM_FRAME, VEHICLE_FRAME, T)]})
                 exporter.write("/ground_truth/odom", ns, {
-                    "header": {"stamp": _stamp(ns), "frame_id": WORLD_FRAME},
+                    "header": {"stamp": _stamp(ns), "frame_id": ODOM_FRAME},
                     "child_frame_id": VEHICLE_FRAME,
                     "pose": {"pose": _pose(T), "covariance": [0.0] * 36},
                     "twist": {
@@ -334,7 +337,7 @@ def main():
     parser.add_argument("-o", "--out", default="mcap", help="Output directory (default: ./mcap)")
     parser.add_argument("--seq", nargs="+", help="Only these sequences (default: all)")
     parser.add_argument("--limit", type=int, help="Export only the first N frames of each sequence")
-    parser.add_argument("--georef", help="Decoded start-pose JSON: adds map -> world and /gnss/fix")
+    parser.add_argument("--georef", help="Decoded start-pose JSON: adds map -> odom_ins and /gnss/fix")
     args = parser.parse_args()
     if not os.path.isdir(args.path):
         parser.error(f"dataset path is not a directory: {args.path}")
