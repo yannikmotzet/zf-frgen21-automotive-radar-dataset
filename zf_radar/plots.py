@@ -24,7 +24,7 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.collections import LineCollection
-    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    from matplotlib.colors import BoundaryNorm, ListedColormap
 except ImportError as e:
     raise SystemExit(
         f"Missing plotting dependency: {e.name}. The route plots need the [plot] extras:\n"
@@ -36,14 +36,28 @@ from zf_radar.loaders import discover_sequences, load_ground_truth, load_pcd_met
 MS_TO_KMH = 3.6
 STATIONARY_MS = 0.3
 
-# Single-hue sequential ramp (light -> dark blue) for speed; starts at a step
-# that still reads as a line on the white surface
-SPEED_CMAP = LinearSegmentedColormap.from_list(
-    "speed", ["#86b6ef", "#3987e5", "#256abf", "#184f95", "#0d366b"]
+# Speed in fixed 20 km/h classes, shared by every route plot so a color always
+# means the same speed. Colors are steps of the perceptually uniform "plasma" map
+# (dark violet -> orange, lightness rising monotonically), stopping before its
+# pale yellow end so the slowest and fastest classes both read on white.
+SPEED_BOUNDS_KMH = [0, 20, 40, 60, 80, 100]
+SPEED_CMAP = ListedColormap(
+    matplotlib.colormaps["plasma"](np.linspace(0.08, 0.85, len(SPEED_BOUNDS_KMH) - 1)), name="speed"
 )
+SPEED_NORM = BoundaryNorm(SPEED_BOUNDS_KMH, SPEED_CMAP.N, clip=True)
 INK = {"primary": "#0b0b0b", "secondary": "#52514e", "muted": "#8a8984", "grid": "#e4e3df"}
 SERIES = "#2a78d6"
 REFERENCE = "#eb6834"
+# One identity color per sequence, shared by every figure that tells sequences apart
+# (six distinct hue families; OKLab dE >= 20 between any two)
+SEQUENCE_COLORS = {
+    "zf_01": "#f57c00",
+    "zf_02": "#00a8d6",
+    "zf_03": "#d81b8c",
+    "zf_04": "#2e9e3e",
+    "zf_05": "#7b3fc4",
+    "zf_06": "#222222",
+}
 
 
 def _style():
@@ -130,13 +144,19 @@ def plot_overview(stats, summaries, out_path):
     cols = min(3, n)
     rows = int(np.ceil(n / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 4.8 * rows), squeeze=False)
-    vmax = max(s["speed"].max() for s in stats.values()) * MS_TO_KMH
-    norm = Normalize(0, vmax)
-
     for ax, (name, s) in zip(axes.flat, stats.items()):
         sm = summaries[name]
-        lc = _route(ax, s, norm)
-        ax.set_title(f"{name}  ·  {sm['distance_km']} km  ·  {sm['duration_min']:.1f} min", loc="left")
+        lc = _route(ax, s, SPEED_NORM)
+        title = f"{name}  ·  {sm['distance_km']} km  ·  {sm['duration_min']:.1f} min"
+        color = SEQUENCE_COLORS.get(name)
+        if color is None:
+            ax.set_title(title, loc="left")
+        else:
+            # identity swatch in the sequence color; the route itself stays colored by speed
+            ax.plot([0.0, 0.05], [1.045, 1.045], transform=ax.transAxes, color=color, lw=5,
+                    solid_capstyle="round", clip_on=False)
+            ax.text(0.075, 1.045, title, transform=ax.transAxes, va="center", ha="left",
+                    fontsize=plt.rcParams["axes.titlesize"], fontweight="semibold", color=INK["primary"])
     for ax in axes.flat[n:]:
         ax.set_visible(False)
 
@@ -155,7 +175,7 @@ def plot_profile(name, s, summary, out_path):
     fig = plt.figure(figsize=(14, 7.5))
     grid = fig.add_gridspec(4, 2, width_ratios=[1.1, 1], hspace=0.35, wspace=0.18)
     ax_route = fig.add_subplot(grid[:, 0])
-    lc = _route(ax_route, s, Normalize(0, s["speed"].max() * MS_TO_KMH))
+    lc = _route(ax_route, s, SPEED_NORM)
     cbar = fig.colorbar(lc, ax=ax_route, shrink=0.5, pad=0.02)
     cbar.set_label("speed [km/h]")
     cbar.outline.set_visible(False)
