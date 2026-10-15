@@ -31,14 +31,21 @@ zf-radar-viz -p /path/to/ZF_Dataset
 
 ## Sequences
 
-| Sequence | Frames | Duration | Distance |
-|----------|-------:|---------:|---------:|
-| zf_01    |  5,205 |  7.8 min |  3.1 km  |
-| zf_02    | 10,914 | 16.4 min |  4.9 km  |
-| zf_03    |  7,548 | 11.3 min |  6.7 km  |
-| zf_04    | 14,971 | 22.5 min | 10.5 km  |
-| zf_05    | 17,717 | 26.6 min | 10.9 km  |
-| zf_06    | 21,643 | 32.5 min | 14.9 km  |
+| Sequence | Frames | Duration | Distance | Speed mean / max | Height range | Standstill | Detections / frame | Doppler-wrapped frames |
+|----------|-------:|---------:|---------:|-----------------:|-------------:|-----------:|-------------------:|-----------------------:|
+| zf_01    |  5,205 |  7.8 min |  3.1 km  | 24 / 32 km/h     |  18 m        |  2.0 %     | 703                | 0.0 %                  |
+| zf_02    | 10,914 | 16.4 min |  4.9 km  | 18 / 46 km/h     |  74 m        | 24.1 %     | 422                | 0.0 %                  |
+| zf_03    |  7,548 | 11.3 min |  6.7 km  | 36 / 92 km/h     |  21 m        |  1.2 %     | 637                | 8.3 %                  |
+| zf_04    | 14,971 | 22.5 min | 10.5 km  | 28 / 72 km/h     | 127 m        | 18.7 %     | 549                | 1.8 %                  |
+| zf_05    | 17,717 | 26.6 min | 10.9 km  | 25 / 51 km/h     | 132 m        | 13.6 %     | 555                | 0.0 %                  |
+| zf_06    | 21,643 | 32.5 min | 14.9 km  | 27 / 99 km/h     | 101 m        | 17.8 %     | 528                | 4.1 %                  |
+
+Standstill is the share of frames with ego speed below 0.3 m/s; the radar reports
+very few detections then (median ≈40 per frame vs. ≈540–640 while moving in
+zf_02 and zf_06).
+Doppler-wrapped frames are those whose ego speed exceeds the frame's wrap speed
+`velocity_ambiguity / 2`, i.e. static targets straight ahead alias. Computed
+with `zf-radar-plot` (`summary.csv`).
 
 ![Top-down routes of all six sequences, colored by speed](docs/routes_overview.png)
 

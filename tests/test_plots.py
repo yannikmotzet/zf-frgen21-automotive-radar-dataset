@@ -26,5 +26,6 @@ def test_summarize():
     assert out["distance_km"] == 0.1
     assert out["duration_min"] == 1.0
     assert out["max_speed_kmh"] == pytest.approx(22 * 3.6, abs=0.1)
+    assert out["stationary_pct"] == pytest.approx(100 * 2 / 11, abs=0.1)
     # frames above their own wrap speed: idx 4 (17 > 16.25), 6 (17 > 16.25), 7 (22 > 21.8), 8 (22 > 16.25)
     assert out["aliased_frames_pct"] == pytest.approx(100 * 4 / 11, abs=0.1)

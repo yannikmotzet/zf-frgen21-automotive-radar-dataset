@@ -34,6 +34,7 @@ except ImportError as e:
 from zf_radar.loaders import discover_sequences, load_ground_truth, load_pcd_meta
 
 MS_TO_KMH = 3.6
+STATIONARY_MS = 0.3
 
 # Single-hue sequential ramp (light -> dark blue) for speed; starts at a step
 # that still reads as a line on the white surface
@@ -102,6 +103,7 @@ def summarize(name, s):
         "max_speed_kmh": round(s["speed"].max() * MS_TO_KMH, 1),
         "height_range_m": round(np.ptp(s["pos"][:, 2]), 1),
         "frame_rate_hz": round((len(s["t"]) - 1) / s["t"][-1], 2),
+        "stationary_pct": round(100 * np.mean(s["speed"] < STATIONARY_MS), 1),
         "mean_detections": round(s["num_points"].mean(), 1),
         "aliased_frames_pct": round(100 * aliased.mean(), 1),
     }
