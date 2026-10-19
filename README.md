@@ -31,31 +31,14 @@ zf-radar-viz -p /path/to/ZF_Dataset
 
 ## Sequences
 
-| Sequence | Frames | Duration | Distance | Speed mean / max | Height range | Standstill | Detections / frame | Doppler-wrapped frames |
-|----------|-------:|---------:|---------:|-----------------:|-------------:|-----------:|-------------------:|-----------------------:|
-| zf_01    |  5,205 |  7.8 min |  3.1 km  | 24 / 32 km/h     |  18 m        |  2.0 %     | 703                | 0.0 %                  |
-| zf_02    | 10,914 | 16.4 min |  4.9 km  | 18 / 46 km/h     |  74 m        | 24.1 %     | 422                | 0.0 %                  |
-| zf_03    |  7,548 | 11.3 min |  6.7 km  | 36 / 92 km/h     |  21 m        |  1.2 %     | 637                | 8.3 %                  |
-| zf_04    | 14,971 | 22.5 min | 10.5 km  | 28 / 72 km/h     | 127 m        | 18.7 %     | 549                | 1.8 %                  |
-| zf_05    | 17,717 | 26.6 min | 10.9 km  | 25 / 51 km/h     | 132 m        | 13.6 %     | 555                | 0.0 %                  |
-| zf_06    | 21,643 | 32.5 min | 14.9 km  | 27 / 99 km/h     | 101 m        | 17.8 %     | 528                | 4.1 %                  |
-
-Standstill is the share of frames with ego speed below 0.3 m/s; the radar reports
-very few detections then (median ≈40 per frame vs. ≈540–640 while moving in
-zf_02 and zf_06).
-Doppler-wrapped frames are those whose ego speed exceeds the frame's wrap speed
-`velocity_ambiguity / 2`, i.e. static targets straight ahead alias. Computed
-with `zf-radar-plot` (`summary.csv`).
-
-![All six routes on an OpenStreetMap base map around Friedrichshafen](docs/routes_map.png)
-
-Approximate location of all routes in and around Friedrichshafen. The dataset
-contains no geodetic coordinates; the placement was reconstructed by matching
-the ground-truth trajectories against OpenStreetMap roads (and a terrain model
-for height) and is accurate to a few metres. Several sequences share roads —
-`zf_02`/`zf_05` in the south of Friedrichshafen and `zf_05`/`zf_06` towards
-Löwental — and others cross, which makes them useful for cross-sequence
-localization and loop closure. Map data © OpenStreetMap contributors (ODbL).
+| Sequence | Frames | Duration | Distance |
+|----------|-------:|---------:|---------:|
+| zf_01    |  5,205 |  7.8 min |  3.1 km  |
+| zf_02    | 10,914 | 16.4 min |  4.9 km  |
+| zf_03    |  7,548 | 11.3 min |  6.7 km  |
+| zf_04    | 14,971 | 22.5 min | 10.5 km  |
+| zf_05    | 17,717 | 26.6 min | 10.9 km  |
+| zf_06    | 21,643 | 32.5 min | 14.9 km  |
 
 ## Directory layout
 
@@ -117,8 +100,7 @@ DATA ascii
 
 **Doppler ambiguity.** Measured radial velocities wrap into the interval
 ±`velocity_ambiguity`/2. The sensor alternates between two scan modes on
-consecutive frames with different ambiguity ranges (≈32.5 and ≈43.6 m/s;
-31.97 and 42.63 m/s in `zf_05`, which uses a different chirp configuration),
+consecutive frames with different ambiguity ranges (≈32.5 and ≈43.6 m/s),
 so the unambiguous interval changes frame to frame — always read it from the
 frame header. Observed field of view is roughly ±50° azimuth, ±15° elevation,
 with detections out to ~100 m.
@@ -161,48 +143,7 @@ doppler = points["velocity"]         # m/s, negative = approaching
 
 This repo ships the same reader (plus pose/extrinsics/sequence helpers) as a
 numpy-only package — `pip install .` then `from zf_radar import load_pcd,
-load_pcd_meta, load_poses, load_ground_truth, load_extrinsics,
-discover_sequences`. `load_pcd_meta` reads only the header (timestamp,
-`velocity_ambiguity`, point count), which is much faster when scanning a whole
-sequence; `load_ground_truth` returns time, poses and body-frame velocities.
-
-## Frame timing
-
-The following was measured from the published timestamps
-(`scripts/analyze_timing.py`); it is not part of the official dataset
-documentation.
-
-![Frame timing: alternating chirp sequences of different length, timestamps at the sequence midpoints](docs/frame_timing.svg)
-
-- **Fixed frame cycle, alternating modes.** Frames are emitted on a 90 ms
-  cycle and the two scan modes strictly alternate (every sequence, no
-  exceptions). Averaged over a sequence the cycle is 90.0000 ms within
-  ±0.15 ppm of GPS time.
-- **Timestamps alternate 86.1 / 94.0 ms.** Because `timestamp_ns` marks the
-  *midpoint* of the chirp sequence and the low-ambiguity mode (≈32.5 m/s,
-  longer chirp repetition interval) chirps ≈7.9 ms longer than the
-  high-ambiguity mode, the midpoint sits at a mode-dependent offset within the
-  cycle. The interval from a low- to a high-ambiguity frame is ≈86.1 ms, the
-  reverse ≈94.0 ms; a pair always spans 180 ms. In `zf_05` the difference is
-  7.56 ms (86.2 / 93.8 ms). Assuming both modes use the same chirp count and
-  a 76.5 GHz carrier, the sequences last roughly 31 ms and 23 ms.
-- **Sawtooth from clock resyncs.** Relative to the ideal grid the timestamps
-  drift at about −65 ppm (≈1 ms over 15 s) and step back roughly every 15.7 s
-  (13.6 s in `zf_05`); the frame right at a step is often ≈1.8 ms late.
-  Residuals stay within ±0.9 ms (99th percentile).
-- **Skipped cycles in `zf_05`.** At 7 places one 90 ms cycle is missing (an
-  interval of ≈166 ms, preceded by a frame ≈10 ms late at ≈103.7 ms). The
-  modes still alternate across the gap, so this is not a frame dropped in
-  post-processing — the sensor apparently skipped a cycle.
-
-In practice: always use the per-frame `timestamp_ns` (never assume a fixed
-`dt`). Within one frame the vehicle keeps moving during the chirp sequence —
-at 99 km/h about 0.85 m over ≈31 ms, i.e. ±0.4 m around the timestamped
-midpoint.
-
-```bash
-python scripts/analyze_timing.py -p /path/to/ZF_Dataset
-```
+load_poses, load_extrinsics, discover_sequences`.
 
 ## Ground truth (`ground_truth.csv`)
 
@@ -287,94 +228,114 @@ upcoming), the rear-axle and sensor positions, and the ego-vehicle outline.
 The azimuth–Doppler plot uses a driver's-eye orientation (targets to the
 right of the vehicle appear on the right).
 
-## Route plots and statistics
+## Fork additions
+
+Tools and observations added in this fork. Everything above is the original
+dataset documentation, unchanged.
+
+### Sequence statistics and routes
+
+| Sequence | Speed mean / max | Height range | Standstill | Detections / frame | Doppler-wrapped frames |
+|----------|-----------------:|-------------:|-----------:|-------------------:|-----------------------:|
+| zf_01    | 24 / 32 km/h     |  18 m        |  2.0 %     | 703                | 0.0 %                  |
+| zf_02    | 18 / 46 km/h     |  74 m        | 24.1 %     | 422                | 0.0 %                  |
+| zf_03    | 36 / 92 km/h     |  21 m        |  1.2 %     | 637                | 8.3 %                  |
+| zf_04    | 28 / 72 km/h     | 127 m        | 18.7 %     | 549                | 1.8 %                  |
+| zf_05    | 25 / 51 km/h     | 132 m        | 13.6 %     | 555                | 0.0 %                  |
+| zf_06    | 27 / 99 km/h     | 101 m        | 17.8 %     | 528                | 4.1 %                  |
+
+Standstill = ego speed below 0.3 m/s; the radar then reports only ~40 detections
+per frame. Doppler-wrapped = ego speed above `velocity_ambiguity / 2`.
+
+![All six routes on an OpenStreetMap base map around Friedrichshafen](docs/routes_map.png)
+
+`zf_02`/`zf_05` and `zf_05`/`zf_06` share roads, which makes them useful for
+cross-sequence localization and loop closure.
+
+### Notes on the data
+
+Measured from the published files; not part of the official documentation.
+
+- **Frame timing.** Frames run on a fixed 90 ms cycle and the two scan modes
+  alternate strictly. `timestamp_ns` marks the middle of the chirp sequence, and
+  the low-ambiguity mode chirps ≈8 ms longer, so consecutive timestamps
+  alternate 86.1 / 94.0 ms. The sensor clock is re-synchronised about every
+  15 s (sawtooth of ±0.9 ms), and `zf_05` skips 7 cycles. Always use the
+  per-frame `timestamp_ns`. Details: `python scripts/analyze_timing.py -p <dataset>`.
+
+  ![Frame timing: alternating chirp sequences, timestamps at the sequence midpoints](docs/frame_timing.svg)
+
+- **`zf_05` uses a different chirp configuration**: `velocity_ambiguity`
+  31.97 / 42.63 m/s instead of 32.50 / 43.57 m/s.
+- **Ground truth: positions on the UTM grid, orientation to true north.** The
+  positions in `ground_truth.csv` were apparently computed in UTM (zone 32N),
+  while orientation and velocities come from the INS relative to true north.
+  Hence on straight roads the GT heading is 0.2–0.4° off the direction of the GT
+  positions (UTM meridian convergence), and distances are ~0.045 % short (UTM
+  scale). For odometry evaluation this adds ~0.3 % to the KITTI translation
+  error of any method; rotating the GT orientation by one constant per sequence
+  (path direction vs. heading on straights, estimable from the GT alone) removes it.
+- **Radar yaw mounting.** The extrinsic rotation is the nominal identity. The
+  data indicate a radar yaw offset of about 0.1° (0.05–0.17°, varying between
+  recording days). With the 3.9 m lever arm this biases any Doppler-based yaw
+  rate by roughly 2.5°/100 m.
+
+### Tools
+
+**Loader.** Besides the functions above: `load_pcd_meta(path)` reads only the
+PCD header (timestamp, `velocity_ambiguity`, point count), and
+`load_ground_truth(seq_dir)` returns time, poses and body-frame velocities.
+
+**Route plots and statistics** (`pip install ".[plot]"`):
 
 ```bash
-pip install ".[plot]"
 zf-radar-plot -p /path/to/ZF_Dataset -o plots/
 ```
 
-Writes `routes_overview.png` (top-down route of every sequence, colored by
-speed), one `<seq>_profile.png` per sequence (route plus speed, height, yaw rate
-and detections per frame over time) and a `summary.csv`. The speed panel marks
-the Doppler wrap speed of both scan modes (`velocity_ambiguity / 2`); the
-summary reports the share of frames whose ego speed exceeds it, i.e. where
-static targets straight ahead show wrapped Doppler. Routes are drawn in each
-sequence's local world frame (the dataset contains no geodetic coordinates —
-see the [map](#sequences) for the reconstructed placement), so their
-orientation differs from the map. The swatch next to each title is the
-sequence's color in the map.
+Writes the overview below, one profile per sequence (speed, height, yaw rate,
+detections over time) and `summary.csv`. Routes are in each sequence's own
+world frame; the swatch is the sequence's color in the map.
 
 ![Top-down routes of all six sequences in their local world frames, colored by speed](docs/routes_overview.png)
 
-## ROS 2 MCAP export
+**Doppler de-aliasing.** `zf_radar.doppler` recovers the unwrapped radial
+velocities from the radar data alone. Static points are unwrapped with an ego
+velocity estimated per frame from the Doppler; moving points by matching them
+to the neighbouring frame, which uses the other scan mode. Checked against the
+ground truth: ≥ 99.9 % of wrapped static points are correct, the ego velocity is
+within a few cm/s; 4–7 % of points (mostly clutter) stay unresolved and are
+flagged. Runs at ~3 ms per frame (`scripts/eval_doppler_unwrap.py`).
+
+```python
+from zf_radar import load_pcd
+from zf_radar.doppler import unwrap_sequence
+for frame, res in unwrap_sequence(load_pcd(p) for p in pcd_paths):
+    res["velocity_unwrapped"], res["unwrap_status"], res["sensor_velocity"]
+```
+
+**ROS 2 MCAP export** (`pip install ".[mcap]"`, no ROS needed):
 
 ```bash
-pip install ".[mcap]"
-zf-radar-mcap -p /path/to/ZF_Dataset -o mcap/           # all sequences
-zf-radar-mcap -p /path/to/ZF_Dataset --seq zf_01 --limit 500   # quick test
+zf-radar-mcap -p /path/to/ZF_Dataset -o mcap/ [--unwrap-doppler]
 ```
 
-Writes one ROS 2 MCAP file per sequence (zstd-compressed). No ROS installation
-is needed for the export; the files open in [Foxglove](https://foxglove.dev)
-and play back with `ros2 bag play -s mcap mcap/zf_01.mcap`. All messages are
-stamped with the radar frame's `timestamp_ns`.
+One file per sequence; opens in [Foxglove](https://foxglove.dev), plays with
+`ros2 bag play -s mcap mcap/zf_01.mcap`. All messages carry the radar frame's
+`timestamp_ns`.
 
 | Topic | Type | Content |
 |-------|------|---------|
-| `/radar/points` | `sensor_msgs/msg/PointCloud2` | All PCD fields as float32, frame `radar` |
-| `/radar/velocity_ambiguity` | `std_msgs/msg/Float32` | Unambiguous Doppler interval [m/s] of the frame |
-| `/ground_truth/odom` | `nav_msgs/msg/Odometry` | Pose `odom_ins` → `base_link`, twist in `base_link` |
-| `/ground_truth/path` | `nav_msgs/msg/Path` | Full trajectory, written once (transient local) |
-| `/tf` | `tf2_msgs/msg/TFMessage` | `odom_ins` → `base_link` per frame |
-| `/tf_static` | `tf2_msgs/msg/TFMessage` | `base_link` → `radar` from `extrinsics.csv` (transient local) |
+| `/radar/points` | `sensor_msgs/PointCloud2` | all PCD fields, frame `radar`; with `--unwrap-doppler` also `velocity_unwrapped`, `wrap_k`, `unwrap_status` |
+| `/radar/velocity_ambiguity` | `std_msgs/Float32` | Doppler interval of the frame [m/s] |
+| `/radar/ego_velocity` | `geometry_msgs/TwistStamped` | radar-only ego velocity (with `--unwrap-doppler`) |
+| `/ground_truth/odom`, `/ground_truth/path` | `nav_msgs` | ground truth, `odom_ins` → `base_link` |
+| `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | `odom_ins` → `base_link` → `radar` |
 
-Frames follow [REP-105](https://www.ros.org/reps/rep-0105.html): `base_link` is
-the vehicle frame (rear axle) and `odom_ins` is an odometry frame whose source
-is the INS ground truth — it is the dataset's world frame (vehicle pose at the
-first frame), so `odom_ins → base_link` equals `ground_truth.csv`. Note that it
-inherits the vehicle's roll/pitch at the first frame, i.e. its z axis is not
-exactly vertical. Ground-truth covariances are not provided by the dataset and
-are written as zeros.
-
-To compare your own estimate (e.g. radar odometry) against the ground truth,
-publish it in its own branch such as `odom_radar → base_link_radar` rather than
-a second parent for `base_link`.
-
-**Geographic start poses (optional).** Given a start pose per sequence,
-`--georef poses.json` (needs `pip install ".[geo]"`) additionally writes
-
-| Topic | Type | Content |
-|-------|------|---------|
-| `/tf_static` | `tf2_msgs/msg/TFMessage` | `map` → `odom_ins`: the sequence start placed in a `map` frame shared by all sequences |
-| `/gnss/fix` | `sensor_msgs/msg/NavSatFix` | WGS 84 latitude/longitude/ellipsoidal height of `base_link`, approximated covariance |
-
-The TF tree becomes `map → odom_ins → base_link → radar`, so `map → base_link`
-can be looked up directly and overlapping sequences line up in `map`. `map` is
-a local frame with small coordinates: its axes follow the UTM grid and its
-origin is the fixed `map_origin` (UTM E, N, ellipsoidal height) from the pose
-file, the same for all sequences — UTM coordinates are `map` coordinates plus
-`map_origin`. For visualization use `map` (or `odom_ins`) as fixed frame; for
-a map overlay in Foxglove, add a Map panel on `/gnss/fix`.
-
-The JSON holds one 4×4 `T_utm_world` per sequence (dataset world frame, i.e.
-`odom_ins` → UTM grid coordinates E, N, ellipsoidal height) and the shared
-`map_origin`:
-
-```json
-{
-  "meta": {"accuracy_m": {"horizontal": 2.0, "vertical": 2.0}},
-  "sequences": {
-    "zf_01": {"crs": "EPSG:32632", "T_utm_world": [[...], [...], [...], [0, 0, 0, 1]],
-              "map_origin": [E, N, h]}
-  }
-}
-```
-
-`zf_radar.georef` can store such a file keyed by the dataset itself (each entry
-is obfuscated with a key derived from that sequence's `ground_truth.csv`) and
-decode it again with `python -m zf_radar.georef -p /path/to/ZF_Dataset --enc
-poses.enc`.
+`base_link` is the rear axle; `odom_ins` is the dataset's world frame (the vehicle
+pose at the first frame, [REP-105](https://www.ros.org/reps/rep-0105.html) naming).
+If you have georeferenced start poses, `--georef poses.json` (`pip install ".[geo]"`)
+adds `map → odom_ins` and `/gnss/fix`; the expected file format is described in
+`zf_radar/georef.py`. No such poses are included in this repository.
 
 ## License
 
