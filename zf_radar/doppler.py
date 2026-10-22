@@ -12,11 +12,15 @@ ground truth:
    frame), so large moving objects at standstill cannot pull it away; a wide
    search runs only at the start or after the track was lost for several frames.
    Inliers are unwrapped to ``-u · v`` (status 1).
-2. **Moving targets.** Each remaining point is associated with a point of the
-   neighbouring frame, which uses the other scan mode. The range change between
-   the two gives a coarse radial velocity; it is accepted only if both wrapped
-   measurements unwrap to the same velocity (staggered-PRF consistency, status 2).
-3. Everything else keeps its measured value (status 0).
+2. **Moving targets.** Each remaining point is associated with a nearby point
+   of the neighbouring frame (ego motion removed), which uses the other scan
+   mode. The two wrapped measurements are consistent with a single velocity
+   within about ±65 m/s (staggered PRF); it is accepted if it also explains the
+   range change between the frames (status 2).
+3. **Objects.** Moving points are clustered into objects and tracked over
+   time; all points of an object take the wrap count that matches its
+   velocity, from its paired points (status 3) or from its track (status 4).
+4. Everything else keeps its measured value (status 0).
 
 Radial velocity is the range rate in the sensor frame, negative = approaching.
 """
@@ -26,6 +30,8 @@ import numpy as np
 STATUS_UNRESOLVED = 0
 STATUS_STATIC = 1
 STATUS_TRACKED = 2
+STATUS_OBJECT = 3
+STATUS_PROPAGATED = 4
 
 
 def wrap(v, ambiguity):
@@ -115,42 +121,196 @@ def estimate_sensor_velocity(u, m, ambiguity, prior=None, threshold=0.25, wide=F
     return v, inliers, inliers.mean()
 
 
-def associate_moving(frame, partner, candidates, dt, yaw_rate=0.0,
-                     max_daz=np.radians(3.0), max_del=np.radians(2.5),
-                     max_dr=6.0, consistency=1.0):
+def _in_frame(partner, dt, sensor_velocity, yaw_rate):
+    """Partner points expressed in the current sensor frame as if the world were
+    static: the sensor moved by ``sensor_velocity * dt`` and turned by ``yaw_rate * dt``."""
+    p = np.column_stack([partner["x"], partner["y"], partner["z"]]).astype(float) - np.asarray(sensor_velocity) * dt
+    c, s = np.cos(yaw_rate * dt), np.sin(yaw_rate * dt)
+    return np.column_stack([c * p[:, 0] + s * p[:, 1], -s * p[:, 0] + c * p[:, 1], p[:, 2]])
+
+
+def associate_moving(frame, partner, candidates, dt, sensor_velocity, yaw_rate=0.0,
+                     max_daz=np.radians(3.0), max_del=np.radians(2.5), max_lateral=2.0, max_vertical=1.0,
+                     max_radial=1.5, consistency=1.0, max_speed=50.0, max_k=3):
     """Unwrap ``candidates`` of ``frame`` against the neighbouring ``partner`` frame.
 
-    ``dt`` is time(frame) - time(partner) in seconds. ``max_dr`` must cover the
-    range change of fast closing traffic (2 x 100 km/h ~ 5 m per 90 ms frame).
-    Returns ``(unwrapped, ok)`` for the candidate indices.
+    ``dt`` is time(frame) - time(partner) in seconds. Partner points are moved
+    into the current frame with the ego motion; a pair is gated by its angular
+    offset (within ``max_daz`` / ``max_del``, or within ``max_lateral`` /
+    ``max_vertical`` metres at the point's range, which matters for close
+    targets). Both frames use different ambiguities, so the pair has a single
+    velocity within about ±65 m/s that is consistent with both wrapped
+    measurements (within ``consistency`` m/s). It is accepted if it also explains
+    the range change (within ``max_radial`` m) and is at most ``max_speed`` m/s
+    over ground. Returns ``(unwrapped, ok)`` for the candidate indices.
     """
     A_t = frame["_meta"]["velocity_ambiguity"]
     A_q = partner["_meta"]["velocity_ambiguity"]
     idx = np.flatnonzero(candidates)
-    unwrapped = np.asarray(frame["velocity"], float)[idx].copy()
+    m_all = np.asarray(frame["velocity"], float)
+    unwrapped = m_all[idx].copy()
     ok = np.zeros(len(idx), bool)
     if len(idx) == 0 or len(partner["velocity"]) == 0:
         return unwrapped, ok
 
     r_t, az_t, el_t = (a[idx] for a in polar(frame))
-    m_t = np.asarray(frame["velocity"], float)[idx]
-    r_q, az_q, el_q = polar(partner)
+    m_t = m_all[idx]
+    pred = -(unit_vectors(frame)[idx] @ np.asarray(sensor_velocity))     # static-world radial velocity
+    q = _in_frame(partner, dt, sensor_velocity, yaw_rate)
+    _, az_q, el_q = polar({"x": q[:, 0], "y": q[:, 1], "z": q[:, 2]})
+    r_q = polar(partner)[0]
     m_q = np.asarray(partner["velocity"], float)
-    # static scene rotates by -yaw * dt in the sensor frame between the frames
-    daz = np.abs(az_t[:, None] - (az_q[None, :] - yaw_rate * dt))
-    gate = (daz < max_daz) & (np.abs(el_t[:, None] - el_q[None, :]) < max_del) \
-        & (np.abs(r_t[:, None] - r_q[None, :]) < max_dr)
 
-    rr = (r_t[:, None] - r_q[None, :]) / dt          # coarse range rate per pair
-    v_t = m_t[:, None] + np.round((rr - m_t[:, None]) / A_t) * A_t
-    v_q = m_q[None, :] + np.round((rr - m_q[None, :]) / A_q) * A_q
+    daz = np.abs(wrap(az_t[:, None] - az_q[None, :], 2 * np.pi))
+    dl = np.abs(el_t[:, None] - el_q[None, :])
+    gate = ((daz < max_daz) | (r_t[:, None] * daz < max_lateral)) & \
+        ((dl < max_del) | (r_t[:, None] * dl < max_vertical))
+    i, j = np.nonzero(gate)
+    if len(i) == 0:
+        return unwrapped, ok
+
+    k = np.arange(-max_k, max_k + 1)
+    v_t = m_t[i, None] + k[None, :] * A_t                                # (pairs, k)
+    v_q = m_q[j, None] + np.round((v_t - m_q[j, None]) / A_q) * A_q
     mismatch = np.abs(v_t - v_q)
-    valid = gate & (mismatch < consistency) & (np.abs(v_t - rr) < 0.25 * min(A_t, A_q))
-    cost = np.where(valid, mismatch + daz / max_daz, np.inf)
-    best = np.argmin(cost, axis=1)
-    ok = np.isfinite(cost[np.arange(len(idx)), best])
-    unwrapped[ok] = v_t[np.arange(len(idx)), best][ok]
+    radial = np.abs((r_t[i] - r_q[j])[:, None] - 0.5 * (v_t + v_q) * dt)
+    valid = (mismatch < consistency) & (radial < max_radial) & (np.abs(v_t - pred[i, None]) < max_speed)
+    lateral = (r_t[i] * daz[i, j])[:, None]
+    cost = np.where(valid, mismatch / consistency + radial / max_radial + lateral / max_lateral, np.inf)
+    kb = np.argmin(cost, axis=1)
+    pair_cost = cost[np.arange(len(i)), kb]
+    pair_v = v_t[np.arange(len(i)), kb]
+
+    order = np.lexsort((pair_cost, i))                                    # best pair per candidate first
+    first = order[np.unique(i[order], return_index=True)[1]]
+    good = first[np.isfinite(pair_cost[first])]
+    unwrapped[i[good]] = pair_v[good]
+    ok[i[good]] = True
     return unwrapped, ok
+
+
+def clusters(xy, eps=2.0):
+    """Labels of single-linkage clusters (points closer than ``eps``)."""
+    n = len(xy)
+    labels = np.arange(n)
+    if n < 2:
+        return labels
+    i, j = np.nonzero(np.triu(np.sum((xy[:, None] - xy[None]) ** 2, axis=-1) < eps * eps, 1))
+    while True:
+        a = np.minimum(labels[i], labels[j])
+        if np.all((labels[i] == a) & (labels[j] == a)):
+            break
+        np.minimum.at(labels, i, a)
+        np.minimum.at(labels, j, a)
+        labels = labels[labels]
+    return np.unique(labels, return_inverse=True)[1]
+
+
+class ObjectTracker:
+    """Object-level de-aliasing of moving points across frames.
+
+    Per frame, the non-static points are clustered into objects. An object's
+    velocity over ground along the line of sight (``g``) comes from its pair-
+    resolved points (median) or, if fewer than ``min_support`` of them agree,
+    from the object's track. Every point of the object then takes the wrap count
+    that brings it closest to ``static prediction + g``, if within ``tolerance``
+    (status 3 from the frame's own points, status 4 from the track); this also
+    overrides single wrongly paired points. Objects are tracked by their
+    centroid in an odometry frame integrated from the radar ego velocity; a
+    track keeps its ``g`` for up to ``max_coast`` frames without support.
+    """
+
+    def __init__(self, lever_x=3.925, eps=2.0, tolerance=4.0, gate=4.0, min_support=3, max_missed=5, max_coast=10):
+        self.lever_x, self.eps, self.tolerance, self.gate = lever_x, eps, tolerance, gate
+        self.min_support, self.max_missed, self.max_coast = min_support, max_missed, max_coast
+        self.pose = np.zeros(3)                       # x, y, yaw of the sensor in the odometry frame
+        self.tracks = []                              # dicts: pos, vel, g, coast, missed
+
+    def _move(self, v, dt):
+        yaw = self.pose[2] + 0.5 * v[1] / self.lever_x * dt
+        c, s = np.cos(yaw), np.sin(yaw)
+        self.pose[:2] += dt * np.array([c * v[0] - s * v[1], s * v[0] + c * v[1]])
+        self.pose[2] += v[1] / self.lever_x * dt
+
+    def _to_odom(self, xy):
+        c, s = np.cos(self.pose[2]), np.sin(self.pose[2])
+        return self.pose[:2] + xy @ np.array([[c, s], [-s, c]])
+
+    def _match(self, centroids, dt):
+        pred = np.array([t["pos"] + t["vel"] * dt for t in self.tracks]).reshape(-1, 2)
+        match = -np.ones(len(centroids), int)
+        if len(pred) == 0 or len(centroids) == 0:
+            return match
+        d = np.linalg.norm(centroids[:, None] - pred[None], axis=-1)
+        used = np.zeros(len(pred), bool)
+        for flat in np.argsort(d, axis=None):
+            c, t = np.unravel_index(flat, d.shape)
+            if d[c, t] >= self.gate:
+                break
+            if match[c] < 0 and not used[t]:
+                match[c], used[t] = t, True
+        return match
+
+    def update(self, frame, res, dt=0.0):
+        """Refine ``res`` (an ``unwrap_frame`` result) in place. ``dt`` is the
+        time since the previous frame passed to ``update``."""
+        v = res["sensor_velocity"]
+        self._move(v, dt)
+        status, vel = res["unwrap_status"], res["velocity_unwrapped"]
+        m = np.asarray(frame["velocity"], float)
+        A = frame["_meta"]["velocity_ambiguity"]
+        mov = np.flatnonzero(status != STATUS_STATIC)
+        xy = np.column_stack([frame["x"], frame["y"]]).astype(float)[mov]
+        pred = -(unit_vectors(frame)[mov] @ v)
+        labels = clusters(xy, self.eps)
+        n = labels.max() + 1 if len(labels) else 0
+        cent = self._to_odom(np.array([xy[labels == c].mean(axis=0) for c in range(n)]).reshape(-1, 2))
+        match = self._match(cent, dt)
+
+        seen = np.zeros(len(self.tracks), bool)
+        new_tracks = []
+        for c in range(n):
+            sel = np.flatnonzero(labels == c)
+            pts = mov[sel]
+            g_pts = vel[pts] - pred[sel]
+            paired = status[pts] == STATUS_TRACKED
+            trk = self.tracks[match[c]] if match[c] >= 0 else None
+            g_trk = trk["g"] if trk is not None and trk["g"] is not None and trk["coast"] <= self.max_coast else None
+            g_vote = np.median(g_pts[paired]) if paired.any() else None
+            ref, source = None, None
+            if g_vote is not None and (paired.sum() >= self.min_support or g_trk is None
+                                       or abs(g_vote - g_trk) < self.tolerance):
+                ref, source = g_vote, STATUS_OBJECT
+            elif g_trk is not None:
+                ref, source = g_trk, STATUS_PROPAGATED
+            g_new = None
+            if ref is not None:
+                v_ref = pred[sel] + ref
+                v_new = m[pts] + np.round((v_ref - m[pts]) / A) * A
+                fit = np.abs(v_new - v_ref) < self.tolerance
+                changed = fit & ((status[pts] == STATUS_UNRESOLVED) | (np.abs(v_new - vel[pts]) > 1e-3))
+                vel[pts[fit]] = v_new[fit]
+                status[pts[changed]] = source
+                if fit.any():
+                    g_new = float(np.median(v_new[fit] - pred[sel][fit]))
+            if trk is not None:
+                seen[match[c]] = True
+                if dt > 0:
+                    trk["vel"] = 0.5 * trk["vel"] + 0.5 * (cent[c] - trk["pos"]) / dt
+                trk["pos"], trk["missed"] = cent[c], 0
+                if g_new is not None:
+                    trk["g"], trk["coast"] = g_new, 0
+                else:
+                    trk["coast"] += 1
+            else:
+                new_tracks.append({"pos": cent[c], "vel": np.zeros(2), "g": g_new, "coast": 0, "missed": 0})
+        for t, s in zip(self.tracks, seen):
+            if not s:
+                t["missed"] += 1
+                t["coast"] += 1
+        self.tracks = [t for t in self.tracks if t["missed"] <= self.max_missed] + new_tracks
+        res["wrap_k"] = np.round((vel - m) / A).astype(np.int8)
+        return res
 
 
 def unwrap_frame(frame, partners=(), prior=None, lever_x=3.925, threshold=0.25, wide=False,
@@ -182,7 +342,8 @@ def unwrap_frame(frame, partners=(), prior=None, lever_x=3.925, threshold=0.25, 
     if partners and len(moving):
         # vehicle has no lateral velocity at the rear axle: sensor vy = yaw_rate * lever
         yaw_rate = v[1] / lever_x
-        sols = [associate_moving(frame, partner, ~static, dt, yaw_rate) for partner, dt in partners]
+        sols = [associate_moving(frame, partner, ~static, dt, v, yaw_rate, consistency=consistency)
+                for partner, dt in partners]
         vel, ok = sols[0]
         if len(sols) == 2:
             (v1, ok1), (v2, ok2) = sols
@@ -205,7 +366,8 @@ def unwrap_frame(frame, partners=(), prior=None, lever_x=3.925, threshold=0.25, 
     }
 
 
-def unwrap_sequence(frames, two_sided=False, lever_x=3.925, threshold=0.25, lost_fraction=0.2, lost_frames=5):
+def unwrap_sequence(frames, two_sided=False, lever_x=3.925, threshold=0.25, lost_fraction=0.2, lost_frames=5,
+                    objects=True):
     """Yield ``(frame, result)`` for consecutive frames (any iterable of
     ``load_pcd`` dicts).
 
@@ -215,7 +377,8 @@ def unwrap_sequence(frames, two_sided=False, lever_x=3.925, threshold=0.25, lost
     which resolves more moving points and rejects inconsistent ones. The
     ego-velocity search is seeded with the previous frame's estimate; after
     ``lost_frames`` frames in a row with a static inlier fraction below
-    ``lost_fraction`` the wide search is re-enabled.
+    ``lost_fraction`` the wide search is re-enabled. With ``objects`` the
+    moving points are refined per object and over time (``ObjectTracker``).
     """
     it = iter(frames)
     cur = next(it, None)
@@ -224,6 +387,7 @@ def unwrap_sequence(frames, two_sided=False, lever_x=3.925, threshold=0.25, lost
     nxt = next(it, None)
     ts = lambda f: f["_meta"]["timestamp_ns"] * 1e-9
     prev, prior, lost = None, None, 0
+    tracker = ObjectTracker(lever_x) if objects else None
     while cur is not None:
         partners = []
         if prev is not None:
@@ -232,6 +396,8 @@ def unwrap_sequence(frames, two_sided=False, lever_x=3.925, threshold=0.25, lost
             partners.append((nxt, ts(cur) - ts(nxt)))
         res = unwrap_frame(cur, partners, prior, lever_x, threshold,
                            wide=prior is not None and lost >= lost_frames)
+        if tracker is not None:
+            tracker.update(cur, res, ts(cur) - ts(prev) if prev is not None else 0.0)
         yield cur, res
         lost = lost + 1 if res["static_fraction"] < lost_fraction else 0
         prior = res["sensor_velocity"]

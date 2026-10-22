@@ -301,10 +301,13 @@ world frame; the swatch is the sequence's color in the map.
 **Doppler de-aliasing.** `zf_radar.doppler` recovers the unwrapped radial
 velocities from the radar data alone. Static points are unwrapped with an ego
 velocity estimated per frame from the Doppler; moving points by matching them
-to the neighbouring frame, which uses the other scan mode. Checked against the
-ground truth: ≥ 99.9 % of wrapped static points are correct, the ego velocity is
-within a few cm/s; 4–7 % of points (mostly clutter) stay unresolved and are
-flagged. Runs at ~3 ms per frame (`scripts/eval_doppler_unwrap.py`).
+to nearby points of the neighbouring frame, which uses the other scan mode, and
+then per object, tracked over time. Checked against the ground truth: ≥ 99.9 % of
+wrapped static points are correct, the ego velocity is within a few cm/s;
+3–4 % of points (mostly isolated clutter) stay unresolved and are flagged.
+Runs at ~6 ms per frame (`scripts/eval_doppler_unwrap.py`; moving targets have no
+ground truth, `scripts/eval_moving_consistency.py` checks them for frame-to-frame
+flicker).
 
 ```python
 from zf_radar import load_pcd

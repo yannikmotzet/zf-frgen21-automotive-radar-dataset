@@ -25,6 +25,8 @@ import time
 import numpy as np
 
 from zf_radar.doppler import (
+    STATUS_OBJECT,
+    STATUS_PROPAGATED,
     STATUS_STATIC,
     STATUS_TRACKED,
     STATUS_UNRESOLVED,
@@ -43,7 +45,7 @@ def evaluate(seq_dir, limit=None, tol=0.3, two_sided=False):
     lever = T[:3, 3]
 
     n_gt_static = n_ok = n_fast = n_fast_ok = n_wrapped = n_wrapped_ok = 0
-    status_counts = np.zeros(3, int)
+    status_counts = np.zeros(5, int)
     vel_err = []
     n_cross = n_cross_ok = n_both = n_conflict = 0
     prev = None
@@ -55,7 +57,8 @@ def evaluate(seq_dir, limit=None, tol=0.3, two_sided=False):
             p_frame, p_res = prev
             tracked = p_res["unwrap_status"] == STATUS_TRACKED
             dt = (p_frame["_meta"]["timestamp_ns"] - frame["_meta"]["timestamp_ns"]) * 1e-9
-            v_fwd, ok = associate_moving(p_frame, frame, tracked, dt, p_res["sensor_velocity"][1] / lever[0])
+            v_fwd, ok = associate_moving(p_frame, frame, tracked, dt, p_res["sensor_velocity"],
+                                         p_res["sensor_velocity"][1] / lever[0])
             agree = np.abs(v_fwd - p_res["velocity_unwrapped"][tracked]) < 1.0
             n_cross += ok.sum()
             n_cross_ok += (ok & agree).sum()
@@ -76,7 +79,7 @@ def evaluate(seq_dir, limit=None, tol=0.3, two_sided=False):
         if np.linalg.norm(v_true) > A / 2:
             n_fast += gt_static.sum()
             n_fast_ok += correct.sum()
-        status_counts += np.bincount(res["unwrap_status"], minlength=3)
+        status_counts += np.bincount(res["unwrap_status"], minlength=5)
         vel_err.append(np.linalg.norm(res["sensor_velocity"][:2] - v_true[:2]))
     vel_err = np.array(vel_err)
     pct = lambda a, b: 100.0 * a / b if b else float("nan")
@@ -106,14 +109,14 @@ def main():
     args = parser.parse_args()
 
     print(f"{'seq':6} {'frames':>6} {'static ok':>9} {'wrapped ok':>10} {'(n wrapped)':>11} {'fast ok':>8} "
-          f"{'v err med':>9} {'p99':>6} {'>1 m/s':>7} {'static':>7} {'tracked':>7} {'unres.':>7} {'x-check':>8} {'ms/fr':>6}")
+          f"{'v err med':>9} {'p99':>6} {'>1 m/s':>7} {'static':>7} {'tracked':>7} {'object':>7} {'track':>7} {'unres.':>7} {'x-check':>8} {'ms/fr':>6}")
     for name in args.seq or discover_sequences(args.path):
         r = evaluate(os.path.join(args.path, name), args.limit, args.tol, args.two_sided)
         s = r["status_pct"]
         print(f"{name:6} {r['frames']:6d} {r['static_correct_pct']:8.2f}% {r['wrapped_static_correct_pct']:9.2f}% "
               f"{r['wrapped_static_points']:11d} {r['fast_frames_static_correct_pct']:7.2f}% "
               f"{r['ego_vel_err_median']:9.3f} {r['ego_vel_err_p99']:6.2f} {r['ego_vel_err_gt_1ms_pct']:6.2f}% "
-              f"{s[STATUS_STATIC]:6.1f}% {s[STATUS_TRACKED]:6.1f}% {s[STATUS_UNRESOLVED]:6.1f}% "
+              f"{s[STATUS_STATIC]:6.1f}% {s[STATUS_TRACKED]:6.1f}% {s[STATUS_OBJECT]:6.1f}% {s[STATUS_PROPAGATED]:6.1f}% {s[STATUS_UNRESOLVED]:6.1f}% "
               f"{r['tracked_crosscheck_agree_pct']:7.2f}% {r['ms_per_frame']:6.1f}",
               flush=True)
 
